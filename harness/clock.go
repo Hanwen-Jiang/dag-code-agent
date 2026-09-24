@@ -74,6 +74,35 @@ func utcNow(clock Clock) string {
 	return clock.Now().UTC().Format(time.RFC3339Nano)
 }
 
+// ManualClock is a clock that only moves when Advance or Set is called.
+//
+// It is the right choice for deterministic lease/idempotency expiry tests:
+// unlike SteppedClock it never moves as a side effect of being read, so the
+// test controls exactly when a deadline passes.
+type ManualClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+// NewManualClock returns a manual clock positioned at the given instant.
+func NewManualClock(at time.Time) *ManualClock { return &ManualClock{at: at} }
+
+func (c *ManualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+// Advance moves the clock forward by d.
+func (c *ManualClock) Advance(d time.Duration) { c.Set(c.Now().Add(d)) }
+
+// Set positions the clock at an absolute instant.
+func (c *ManualClock) Set(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = at
+}
+
 // clockOrSystem normalizes a possibly-nil clock.
 func clockOrSystem(clock Clock) Clock {
 	if clock == nil {
