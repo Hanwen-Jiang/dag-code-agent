@@ -34,10 +34,10 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"agent-harness/packages/embedding"
-	"agent-harness/packages/sandbox/wasi"
-	"agent-harness/packages/vectordb"
-	pb "agent-harness/proto/agent_core"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/embedding"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/sandbox/wasi"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/vectordb"
+	pb "github.com/Hanwen-Jiang/dag-code-agent/proto/agent_core"
 )
 
 // version is the agent-core build identifier reported by /health.

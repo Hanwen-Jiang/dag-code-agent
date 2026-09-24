@@ -17,7 +17,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver
 
-	"agent-harness/packages/vector"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/vector"
 )
 
 // VectorError aliases the shared vector error type for convenient use in

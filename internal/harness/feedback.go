@@ -1,6 +1,6 @@
 package harness
 
-type FeedbackCollector struct{ Store *Store }
+type FeedbackCollector struct{ Store FeedbackStore }
 
 func (c FeedbackCollector) Record(auth AuthContext, signal FeedbackSignal) error {
 	signal.TenantID = auth.TenantID

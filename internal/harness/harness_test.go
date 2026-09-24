@@ -94,16 +94,19 @@ func TestOfflineDemoClosesLoopAndReplays(t *testing.T) {
 	}
 }
 
-func newRuntimeForTest(t *testing.T, responses []ModelResponse) (*Runtime, *Store, AuthContext, TaskRequest) {
+func newRuntimeForTest(t *testing.T, responses []ModelResponse) (*Runtime, Store, AuthContext, TaskRequest) {
 	t.Helper()
-	store, err := NewStore(":memory:")
+	store, err := NewSQLiteStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	registry := NewToolRegistry()
 	tools := NewToolRuntime(registry, store)
 	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
-	runtime := NewRuntime(store, NewScriptedModel(responses), tools, NewContextBuilder(nil, NewSkillRegistry(), registry, NewPrefixCache(4)), nil)
+	runtime, err := New(WithStore(store), WithModel(NewScriptedModel(responses)), WithTools(tools), WithContextBuilder(NewContextBuilder(nil, NewSkillRegistry(), registry, NewPrefixCache(4))))
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := TaskRequest{TaskID: "task", Goal: "finish the task", TenantID: auth.TenantID, SubjectID: auth.SubjectID, ContextWindow: 2048, MaxSteps: 8}
 	return runtime, store, auth, request
 }
@@ -168,7 +171,7 @@ func TestLoopAndContextBudgetTerminateDeterministically(t *testing.T) {
 	call := ToolCall{CallID: "same", Name: "echo", Arguments: map[string]any{"value": "x"}}
 	runtime, store, auth, request := newRuntimeForTest(t, []ModelResponse{{ToolCalls: []ToolCall{call}}, {ToolCalls: []ToolCall{call}}, {ToolCalls: []ToolCall{call}}, {ToolCalls: []ToolCall{call}}})
 	defer store.Close()
-	_ = runtime.Tools.Registry.Register(ToolSpec{Name: "echo", Description: "echo", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}, "required": []string{"value"}}, Handler: func(args map[string]any, _ AuthContext) (any, error) { return args, nil }})
+	_ = runtime.Tools().Registry.Register(ToolSpec{Name: "echo", Description: "echo", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}, "required": []string{"value"}}, Handler: func(args map[string]any, _ AuthContext) (any, error) { return args, nil }})
 	looped := runtime.Run(context.Background(), request, auth)
 	if looped.Status != TaskFailed || looped.FailureCategory != "LOOP" {
 		t.Fatalf("loop=%+v", looped)
@@ -191,13 +194,13 @@ func TestEventTamperingAndOptimisticConflict(t *testing.T) {
 	}
 	defer env.Store.Close()
 	result := env.Run(context.Background())
-	if _, err := env.Store.db.Exec(`UPDATE harness_events SET payload_json='{"tampered":true}' WHERE task_id=? AND sequence=2`, result.TaskID); err != nil {
+	if _, err := env.Store.(*SQLiteStore).db.Exec(`UPDATE harness_events SET payload_json='{"tampered":true}' WHERE task_id=? AND sequence=2`, result.TaskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := env.Runtime.Replay(result.TaskID); !errors.Is(err, ErrStoreConflict) {
 		t.Fatalf("tamper err=%v", err)
 	}
-	stateStore, err := NewStore(":memory:")
+	stateStore, err := NewSQLiteStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,25 +213,43 @@ func TestEventTamperingAndOptimisticConflict(t *testing.T) {
 	if _, err := stateStore.db.Exec(`UPDATE harness_tasks SET state_json='{"task_id":"state-tamper","goal":"rewritten","status":"COMPLETED"}' WHERE task_id=?`, stateResult.TaskID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stateStore.ReplayState(stateResult.TaskID); !errors.Is(err, ErrStoreConflict) {
+	if _, err := NewJournal(stateStore, SystemClock()).ReplayState(stateResult.TaskID); !errors.Is(err, ErrStoreConflict) {
 		t.Fatalf("state tamper err=%v", err)
 	}
 
-	store, _ := NewStore(":memory:")
+	store, _ := NewSQLiteStore(":memory:")
 	defer store.Close()
 	state := TaskState{TaskID: "optimistic", Goal: "g", TenantID: "t", SubjectID: "s"}
 	state.Normalize()
-	if _, err := store.CreateTaskWithEvent(state, "CREATED", map[string]any{}); err != nil {
+	journal := NewJournal(store, SystemClock())
+	if _, err := journal.Create(state, "CREATED", map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
+	// The optimistic-concurrency check now lives in the store primitive that
+	// the journal drives: a stale writer must be refused, not fork the chain.
+	tail, ok, err := store.LatestEvent(state.TaskID)
+	if err != nil || !ok {
+		t.Fatalf("tail ok=%v err=%v", ok, err)
+	}
+	next, err := nextEvent(&tail, state, "BAD", map[string]any{}, SystemClock().Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.TaskVersion = tail.TaskVersion + 1
 	wrong := 9
-	if _, err := store.CommitStateEvent(state, "BAD", map[string]any{}, &wrong, nil); !errors.Is(err, ErrStoreConflict) {
+	if err := store.AppendEvent(state, &wrong, &tail.Sequence, next); !errors.Is(err, ErrStoreConflict) {
 		t.Fatalf("conflict err=%v", err)
+	}
+	// A non-contiguous event must be refused even with no version hint.
+	forked := next
+	forked.Sequence = tail.Sequence + 5
+	if err := store.AppendEvent(state, nil, nil, forked); !errors.Is(err, ErrStoreConflict) {
+		t.Fatalf("fork err=%v", err)
 	}
 }
 
 func TestToolSchemaScopeIdempotencyAndUnknown(t *testing.T) {
-	store, _ := NewStore(":memory:")
+	store, _ := NewSQLiteStore(":memory:")
 	defer store.Close()
 	registry := NewToolRegistry()
 	runtime := NewToolRuntime(registry, store)
@@ -279,7 +300,7 @@ func TestToolSchemaScopeIdempotencyAndUnknown(t *testing.T) {
 }
 
 func TestMCPMemoryAndSkillLifecycle(t *testing.T) {
-	store, _ := NewStore(":memory:")
+	store, _ := NewSQLiteStore(":memory:")
 	defer store.Close()
 	registry := NewToolRegistry()
 	tools := NewToolRuntime(registry, store)
@@ -402,7 +423,7 @@ func TestMultiAgentConflictEvaluationAndPrefixCache(t *testing.T) {
 	defer store.Close()
 	coordinator := MultiAgentCoordinator{Factory: func(spec SubagentSpec) ModelAdapter {
 		return NewScriptedModel([]ModelResponse{{Text: "result-" + spec.AgentID}})
-	}, Context: runtime.Context, Tools: runtime.Tools.Registry, Runtime: runtime.Tools, MaxParallel: 2}
+	}, Context: runtime.ContextBuilder(), Tools: runtime.Tools().Registry, Runtime: runtime.Tools(), MaxParallel: 2}
 	results, err := coordinator.FanOut(context.Background(), []SubagentSpec{{AgentID: "a", Role: "researcher", Objective: "research"}, {AgentID: "b", Role: "verifier", Objective: "verify"}}, request, auth)
 	if err != nil || len(results) != 2 {
 		t.Fatalf("results=%+v err=%v", results, err)
@@ -437,7 +458,7 @@ func TestMultiAgentConflictEvaluationAndPrefixCache(t *testing.T) {
 }
 
 func TestFeedbackPromotionGateAndExecutionPolicy(t *testing.T) {
-	store, _ := NewStore(":memory:")
+	store, _ := NewSQLiteStore(":memory:")
 	defer store.Close()
 	auth := AuthContext{TenantID: "tenant", SubjectID: "user"}
 	collector := FeedbackCollector{Store: store}
@@ -487,7 +508,7 @@ func TestFeedbackPromotionGateAndExecutionPolicy(t *testing.T) {
 func TestArtifactStoreSurvivesRestartAndPreservesIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "harness.sqlite")
 	auth := AuthContext{TenantID: "tenant", SubjectID: "subject"}
-	store, err := NewStore(path)
+	store, err := NewSQLiteStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +520,7 @@ func TestArtifactStoreSurvivesRestartAndPreservesIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := NewStore(path)
+	reopened, err := NewSQLiteStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -80,15 +80,15 @@ func (r *ToolRegistry) schemas(allowed []string, auth *AuthContext) []map[string
 
 type ToolRuntime struct {
 	Registry *ToolRegistry
-	Store    *Store
+	Store    IdempotencyStore
 	Policy   *ExecutionPolicy
 }
 
-func NewToolRuntime(registry *ToolRegistry, store *Store) *ToolRuntime {
+func NewToolRuntime(registry *ToolRegistry, store IdempotencyStore) *ToolRuntime {
 	return &ToolRuntime{Registry: registry, Store: store}
 }
 
-func NewToolRuntimeWithPolicy(registry *ToolRegistry, store *Store, policy ExecutionPolicy) *ToolRuntime {
+func NewToolRuntimeWithPolicy(registry *ToolRegistry, store IdempotencyStore, policy ExecutionPolicy) *ToolRuntime {
 	return &ToolRuntime{Registry: registry, Store: store, Policy: &policy}
 }
 

@@ -220,8 +220,8 @@ Production Failures → Taxonomy → Hypothesis → Ablation Test
 ### 使用 PGVector 进行 RAG
 ```go
 import (
-    "agent-harness/packages/vector/pgvector"
-    "agent-harness/packages/embedding"
+    "github.com/Hanwen-Jiang/dag-code-agent/packages/vector/pgvector"
+    "github.com/Hanwen-Jiang/dag-code-agent/packages/embedding"
 )
 
 // Initialize PGVector store
@@ -247,7 +247,7 @@ results, err := retriever.Search(ctx, "Complex query here", vector.SearchOptions
 
 ### 使用 WASI 沙箱运行用户代码
 ```go
-import "agent-harness/packages/sandbox/wasi"
+import "github.com/Hanwen-Jiang/dag-code-agent/packages/sandbox/wasi"
 
 // Initialize WASI sandbox
 wasiSandbox := wasi.NewBackend()
@@ -279,7 +279,7 @@ if result.Status == sandbox.ExecSecurityViolation {
 
 ### 使用带版本管理的 Prompt Engine
 ```go
-import "agent-harness/packages/prompt_engine"
+import "github.com/Hanwen-Jiang/dag-code-agent/packages/prompt-engine"
 
 pm := prompt_engine.NewPromptManager()
 

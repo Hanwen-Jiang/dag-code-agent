@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"agent-harness/packages/embedding"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/embedding"
 )
 
 // dim is the shared test vector dimensionality.

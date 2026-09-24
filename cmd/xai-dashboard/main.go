@@ -25,7 +25,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"agent-harness/packages/xai"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/xai"
 )
 
 type Config struct {

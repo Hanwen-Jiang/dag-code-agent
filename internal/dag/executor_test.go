@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	h "agent-harness/internal/harness"
+	h "github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
 )
 
 func testManifest(t *testing.T) Manifest {
@@ -18,9 +18,9 @@ func testManifest(t *testing.T) Manifest {
 	}
 	return m
 }
-func testExecutor(t *testing.T, m Manifest, outcomes map[string][]string) (*Executor, *h.Store) {
+func testExecutor(t *testing.T, m Manifest, outcomes map[string][]string) (*Executor, h.Store) {
 	t.Helper()
-	store, err := h.NewStore(":memory:")
+	store, err := h.NewSQLiteStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}

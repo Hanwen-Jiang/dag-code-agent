@@ -63,7 +63,7 @@ This document describes the implementation of production-grade **Three-Layer Arc
 ## Implementation Status (as of this build)
 
 The design above is **fully implemented and running** as seven Go binaries under a single
-`agent-harness` module. Each layer degrades gracefully to an in-process local implementation
+`github.com/Hanwen-Jiang/dag-code-agent` module. Each layer degrades gracefully to an in-process local implementation
 when its external dependency is unreachable, so the whole stack runs offline
 (`./scripts/smoke.sh` → **PASS: 18 / FAIL: 0**).
 

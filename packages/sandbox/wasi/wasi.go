@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"agent-harness/packages/sandbox"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/sandbox"
 )
 
 // Backend is a sandbox.Sandbox backed by WASI + wasmtime.

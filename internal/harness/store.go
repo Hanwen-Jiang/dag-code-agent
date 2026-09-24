@@ -1,9 +1,7 @@
 package harness
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,12 +49,26 @@ type ArtifactRecord struct {
 	CreatedAt  string         `json:"created_at"`
 }
 
-type Store struct {
-	db *sql.DB
-	mu sync.Mutex
+// SQLiteStore is the default Store backend. It is pure Go (no CGO) and
+// serializes writes on a single connection so that an event append and its
+// materialized state update commit in one transaction.
+//
+// Because writes are serialized per instance, several embedded runtimes that
+// share one *file* database will contend with each other. Use distinct files,
+// in-memory stores, or a different backend for multi-instance embedding.
+type SQLiteStore struct {
+	db    *sql.DB
+	mu    sync.Mutex
+	clock Clock
 }
 
-func NewStore(path string) (*Store, error) {
+// SetClock replaces the time source used for timestamps and lease expiry. It
+// must be called before the store is shared with other goroutines.
+func (s *SQLiteStore) SetClock(clock Clock) { s.clock = clockOrSystem(clock) }
+
+func (s *SQLiteStore) now() string { return utcNow(s.clock) }
+
+func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if path == "" {
 		path = ":memory:"
 	}
@@ -71,7 +83,7 @@ func NewStore(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	store := &Store{db: db}
+	store := &SQLiteStore{db: db, clock: SystemClock()}
 	if _, err = db.Exec(`PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;`); err != nil {
 		db.Close()
 		return nil, err
@@ -83,7 +95,7 @@ func NewStore(path string) (*Store, error) {
 	return store, nil
 }
 
-func (s *Store) init() error {
+func (s *SQLiteStore) init() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS harness_tasks (
  task_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL
@@ -128,39 +140,16 @@ CREATE TABLE IF NOT EXISTS harness_artifacts (
 	return err
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 func canonical(v any) ([]byte, error) { return CanonicalJSON(v) }
 
-func hashEvent(previous, eventType string, payload map[string]any, sequence int) (string, error) {
-	b, err := canonical(map[string]any{"previous_hash": previous, "sequence": sequence, "event_type": eventType, "payload": payload})
-	if err != nil {
-		return "", err
-	}
-	h := sha256.Sum256(b)
-	return "sha256:" + hex.EncodeToString(h[:]), nil
-}
-
+// encodeState materializes a task snapshot for the tasks/checkpoints tables.
+// The chain fields themselves are computed in journal.go.
 func encodeState(state TaskState) (string, error) {
 	state.Normalize()
 	b, err := canonical(state)
 	return string(b), err
-}
-
-func stateDigest(state TaskState) string {
-	digest, _ := Digest(state)
-	return digest
-}
-
-func eventPayload(state TaskState, payload map[string]any) map[string]any {
-	result := make(map[string]any, len(payload)+1)
-	for key, value := range payload {
-		result[key] = value
-	}
-	// The digest is part of the hashed event payload. It binds the materialized
-	// state/checkpoint written in the same transaction to the journal entry.
-	result["_state_digest"] = stateDigest(state)
-	return result
 }
 
 func decodeState(value string) (TaskState, error) {
@@ -172,7 +161,7 @@ func decodeState(value string) (TaskState, error) {
 	return state, nil
 }
 
-func (s *Store) withTx(fn func(*sql.Tx) error) error {
+func (s *SQLiteStore) withTx(fn func(*sql.Tx) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -186,43 +175,53 @@ func (s *Store) withTx(fn func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
-func (s *Store) CreateTaskWithEvent(state TaskState, eventType string, payload map[string]any) (Event, error) {
+// CreateTask atomically creates the task row, its genesis event and the
+// genesis checkpoint. The event arrives fully computed from the core journal
+// (see journal.go); this method never recomputes chain fields.
+func (s *SQLiteStore) CreateTask(state TaskState, genesis Event) error {
 	state.Normalize()
 	stateJSON, err := encodeState(state)
 	if err != nil {
-		return Event{}, err
+		return err
 	}
-	now := UTCNow()
-	payload = eventPayload(state, payload)
-	h, err := hashEvent("GENESIS", eventType, payload, 1)
+	if genesis.Sequence != 1 {
+		return fmt.Errorf("%w: genesis event must be sequence 1", ErrStoreConflict)
+	}
+	payloadJSON, err := canonical(genesis.Payload)
 	if err != nil {
-		return Event{}, err
+		return err
 	}
-	e := Event{TaskID: state.TaskID, Sequence: 1, Type: eventType, Payload: payload,
-		PreviousHash: "GENESIS", EventHash: h, CreatedAt: now, TaskVersion: 1}
-	err = s.withTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`INSERT INTO harness_tasks(task_id,state_json,version,updated_at) VALUES(?,?,?,?)`, state.TaskID, stateJSON, 1, now); err != nil {
+	createdAt := genesis.CreatedAt
+	if createdAt == "" {
+		createdAt = s.now()
+	}
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO harness_tasks(task_id,state_json,version,updated_at) VALUES(?,?,?,?)`, state.TaskID, stateJSON, genesis.TaskVersion, createdAt); err != nil {
 			return err
 		}
-		payloadJSON, _ := canonical(payload)
-		if _, err := tx.Exec(`INSERT INTO harness_events(task_id,sequence,event_type,payload_json,previous_hash,event_hash,created_at,task_version) VALUES(?,?,?,?,?,?,?,?)`, state.TaskID, 1, eventType, string(payloadJSON), "GENESIS", h, now, 1); err != nil {
+		if _, err := tx.Exec(`INSERT INTO harness_events(task_id,sequence,event_type,payload_json,previous_hash,event_hash,created_at,task_version) VALUES(?,?,?,?,?,?,?,?)`, state.TaskID, genesis.Sequence, genesis.Type, string(payloadJSON), genesis.PreviousHash, genesis.EventHash, createdAt, genesis.TaskVersion); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`INSERT INTO harness_checkpoints(task_id,sequence,state_json,created_at) VALUES(?,?,?,?)`, state.TaskID, 1, stateJSON, now)
+		_, err := tx.Exec(`INSERT INTO harness_checkpoints(task_id,sequence,state_json,created_at) VALUES(?,?,?,?)`, state.TaskID, genesis.Sequence, stateJSON, createdAt)
 		return err
 	})
-	return e, err
 }
 
-func (s *Store) CommitStateEvent(state TaskState, eventType string, payload map[string]any, expectedVersion, expectedSequence *int) (Event, error) {
+// AppendEvent atomically appends a fully computed event together with the
+// state it materializes. Every precondition is checked inside the same
+// transaction as the write, so a stale caller fails with ErrStoreConflict
+// instead of forking the journal.
+func (s *SQLiteStore) AppendEvent(state TaskState, expectedVersion, expectedSequence *int, next Event) error {
 	state.Normalize()
 	stateJSON, err := encodeState(state)
 	if err != nil {
-		return Event{}, err
+		return err
 	}
-	payload = eventPayload(state, payload)
-	var result Event
-	err = s.withTx(func(tx *sql.Tx) error {
+	payloadJSON, err := canonical(next.Payload)
+	if err != nil {
+		return err
+	}
+	return s.withTx(func(tx *sql.Tx) error {
 		var currentVersion int
 		if err := tx.QueryRow(`SELECT version FROM harness_tasks WHERE task_id=?`, state.TaskID).Scan(&currentVersion); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -245,30 +244,32 @@ func (s *Store) CommitStateEvent(state TaskState, eventType string, payload map[
 		if expectedSequence != nil && seq != *expectedSequence {
 			return fmt.Errorf("%w: sequence=%d expected=%d", ErrStoreConflict, seq, *expectedSequence)
 		}
-		nextSeq := seq + 1
-		eventHash, err := hashEvent(previous, eventType, payload, nextSeq)
-		if err != nil {
+		// Defense in depth: the core computed these fields, but a backend that
+		// accepted a non-contiguous event would corrupt the chain. Refuse it.
+		if next.Sequence != seq+1 || next.PreviousHash != previous {
+			return fmt.Errorf("%w: event does not extend the journal tail", ErrStoreConflict)
+		}
+		if next.TaskVersion != currentVersion+1 {
+			return fmt.Errorf("%w: version=%d expected=%d", ErrStoreConflict, next.TaskVersion, currentVersion+1)
+		}
+		createdAt := next.CreatedAt
+		if createdAt == "" {
+			createdAt = s.now()
+		}
+		if _, err := tx.Exec(`INSERT INTO harness_events(task_id,sequence,event_type,payload_json,previous_hash,event_hash,created_at,task_version) VALUES(?,?,?,?,?,?,?,?)`, state.TaskID, next.Sequence, next.Type, string(payloadJSON), next.PreviousHash, next.EventHash, createdAt, next.TaskVersion); err != nil {
 			return err
 		}
-		now := UTCNow()
-		payloadJSON, _ := canonical(payload)
-		nextVersion := currentVersion + 1
-		if _, err := tx.Exec(`INSERT INTO harness_events(task_id,sequence,event_type,payload_json,previous_hash,event_hash,created_at,task_version) VALUES(?,?,?,?,?,?,?,?)`, state.TaskID, nextSeq, eventType, string(payloadJSON), previous, eventHash, now, nextVersion); err != nil {
+		if _, err := tx.Exec(`UPDATE harness_tasks SET state_json=?,version=?,updated_at=? WHERE task_id=?`, stateJSON, next.TaskVersion, createdAt, state.TaskID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE harness_tasks SET state_json=?,version=?,updated_at=? WHERE task_id=?`, stateJSON, nextVersion, now, state.TaskID); err != nil {
+		if _, err := tx.Exec(`INSERT INTO harness_checkpoints(task_id,sequence,state_json,created_at) VALUES(?,?,?,?)`, state.TaskID, next.Sequence, stateJSON, createdAt); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO harness_checkpoints(task_id,sequence,state_json,created_at) VALUES(?,?,?,?)`, state.TaskID, nextSeq, stateJSON, now); err != nil {
-			return err
-		}
-		result = Event{TaskID: state.TaskID, Sequence: nextSeq, Type: eventType, Payload: payload, PreviousHash: previous, EventHash: eventHash, CreatedAt: now, TaskVersion: nextVersion}
 		return nil
 	})
-	return result, err
 }
 
-func (s *Store) GetTask(taskID string) (TaskState, int, error) {
+func (s *SQLiteStore) GetTask(taskID string) (TaskState, int, error) {
 	var stateJSON string
 	var version int
 	err := s.db.QueryRow(`SELECT state_json,version FROM harness_tasks WHERE task_id=?`, taskID).Scan(&stateJSON, &version)
@@ -285,7 +286,7 @@ func (s *Store) GetTask(taskID string) (TaskState, int, error) {
 // ListTasks returns materialized task state in update order. The session API
 // uses this projection for a lightweight inbox; event payloads remain behind
 // the per-session event endpoint so listing never loads an entire trajectory.
-func (s *Store) ListTasks() ([]TaskState, error) {
+func (s *SQLiteStore) ListTasks() ([]TaskState, error) {
 	rows, err := s.db.Query(`SELECT state_json FROM harness_tasks ORDER BY updated_at DESC, task_id DESC`)
 	if err != nil {
 		return nil, err
@@ -306,21 +307,21 @@ func (s *Store) ListTasks() ([]TaskState, error) {
 	return result, rows.Err()
 }
 
-func (s *Store) Events(taskID string) ([]Event, error) {
+func (s *SQLiteStore) Events(taskID string) ([]Event, error) {
 	return s.eventsFrom(taskID, 0)
 }
 
 // EventsSince returns the append-only journal suffix after sequence. It is
 // used by reconnecting clients and the SSE projection so a browser can resume
 // from Last-Event-ID without downloading the whole trajectory again.
-func (s *Store) EventsSince(taskID string, sequence int) ([]Event, error) {
+func (s *SQLiteStore) EventsSince(taskID string, sequence int) ([]Event, error) {
 	if sequence < 0 {
 		sequence = 0
 	}
 	return s.eventsFrom(taskID, sequence)
 }
 
-func (s *Store) eventsFrom(taskID string, sequence int) ([]Event, error) {
+func (s *SQLiteStore) eventsFrom(taskID string, sequence int) ([]Event, error) {
 	rows, err := s.db.Query(`SELECT sequence,event_type,payload_json,previous_hash,event_hash,created_at,task_version FROM harness_events WHERE task_id=? AND sequence>? ORDER BY sequence`, taskID, sequence)
 	if err != nil {
 		return nil, err
@@ -342,73 +343,51 @@ func (s *Store) eventsFrom(taskID string, sequence int) ([]Event, error) {
 	return events, rows.Err()
 }
 
-func (s *Store) Replay(taskID string) ([]Event, error) {
-	events, err := s.Events(taskID)
+// LatestEvent returns the journal tail. ok is false when the task has no
+// events yet, which the core treats as "the next event is genesis".
+func (s *SQLiteStore) LatestEvent(taskID string) (Event, bool, error) {
+	var e Event
+	var payload string
+	err := s.db.QueryRow(`SELECT sequence,event_type,payload_json,previous_hash,event_hash,created_at,task_version FROM harness_events WHERE task_id=? ORDER BY sequence DESC LIMIT 1`, taskID).Scan(&e.Sequence, &e.Type, &payload, &e.PreviousHash, &e.EventHash, &e.CreatedAt, &e.TaskVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, false, nil
+	}
 	if err != nil {
-		return nil, err
+		return Event{}, false, err
 	}
-	previous := "GENESIS"
-	for i, event := range events {
-		if event.Sequence != i+1 || event.PreviousHash != previous {
-			return nil, fmt.Errorf("%w: broken event link at %d", ErrStoreConflict, event.Sequence)
-		}
-		h, err := hashEvent(previous, event.Type, event.Payload, event.Sequence)
-		if err != nil {
-			return nil, err
-		}
-		if h != event.EventHash {
-			return nil, fmt.Errorf("%w: tampered event at %d", ErrStoreConflict, event.Sequence)
-		}
-		previous = h
+	if err := json.Unmarshal([]byte(payload), &e.Payload); err != nil {
+		return Event{}, false, err
 	}
-	return events, nil
+	e.TaskID = taskID
+	return e, true, nil
 }
 
-// ReplayState verifies the journal and the state snapshot written alongside
-// every event. A caller can therefore distinguish a stale materialized row
-// from a valid replay without trusting the row alone.
-func (s *Store) ReplayState(taskID string) (TaskState, error) {
-	events, err := s.Replay(taskID)
+// CheckpointAt returns the state snapshot written alongside a given event
+// sequence. ok is false when that sequence has no checkpoint.
+func (s *SQLiteStore) CheckpointAt(taskID string, sequence int) (Checkpoint, bool, error) {
+	var c Checkpoint
+	var stateJSON string
+	err := s.db.QueryRow(`SELECT sequence,state_json,created_at FROM harness_checkpoints WHERE task_id=? AND sequence=?`, taskID, sequence).Scan(&c.Sequence, &stateJSON, &c.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Checkpoint{}, false, nil
+	}
 	if err != nil {
-		return TaskState{}, err
+		return Checkpoint{}, false, err
 	}
-	if len(events) == 0 {
-		return TaskState{}, ErrNotFound
-	}
-	for _, event := range events {
-		digest, ok := event.Payload["_state_digest"].(string)
-		if !ok || digest == "" {
-			// Legacy rows written before state digests remain replayable; new
-			// rows always take the verification path below.
-			continue
-		}
-		var stateJSON string
-		if err := s.db.QueryRow(`SELECT state_json FROM harness_checkpoints WHERE task_id=? AND sequence=?`, taskID, event.Sequence).Scan(&stateJSON); err != nil {
-			return TaskState{}, fmt.Errorf("%w: missing checkpoint at %d", ErrStoreConflict, event.Sequence)
-		}
-		checkpointState, err := decodeState(stateJSON)
-		if err != nil {
-			return TaskState{}, err
-		}
-		if got := stateDigest(checkpointState); got != digest {
-			return TaskState{}, fmt.Errorf("%w: state digest mismatch at %d", ErrStoreConflict, event.Sequence)
-		}
-	}
-	state, _, err := s.GetTask(taskID)
+	c.TaskID = taskID
+	c.StateJSON = stateJSON
+	c.State, err = decodeState(stateJSON)
 	if err != nil {
-		return TaskState{}, err
+		return Checkpoint{}, false, err
 	}
-	last, err := s.LatestCheckpoint(taskID)
-	if err != nil {
-		return TaskState{}, err
-	}
-	if last.Sequence != events[len(events)-1].Sequence || stateDigest(state) != stateDigest(last.State) {
-		return TaskState{}, fmt.Errorf("%w: materialized state diverged from checkpoint", ErrStoreConflict)
-	}
-	return state, nil
+	return c, true, nil
 }
 
-func (s *Store) LatestCheckpoint(taskID string) (Checkpoint, error) {
+// Replay, ReplayState and the state-digest verification live in journal.go:
+// they are invariants of the core, not of any single backend. A backend only
+// has to serve Events/CheckpointAt/GetTask correctly.
+
+func (s *SQLiteStore) LatestCheckpoint(taskID string) (Checkpoint, error) {
 	var c Checkpoint
 	var stateJSON string
 	err := s.db.QueryRow(`SELECT sequence,state_json,created_at FROM harness_checkpoints WHERE task_id=? ORDER BY sequence DESC LIMIT 1`, taskID).Scan(&c.Sequence, &stateJSON, &c.CreatedAt)
@@ -424,12 +403,12 @@ func (s *Store) LatestCheckpoint(taskID string) (Checkpoint, error) {
 	return c, err
 }
 
-func (s *Store) PutIdempotency(scope, key string, value any) (bool, error) {
+func (s *SQLiteStore) PutIdempotency(scope, key string, value any) (bool, error) {
 	b, err := canonical(value)
 	if err != nil {
 		return false, err
 	}
-	now := UTCNow()
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result, err := s.db.Exec(`INSERT OR IGNORE INTO harness_idempotency(scope,idem_key,result_json,created_at) VALUES(?,?,?,?)`, scope, key, string(b), now)
@@ -440,7 +419,7 @@ func (s *Store) PutIdempotency(scope, key string, value any) (bool, error) {
 	return n == 1, nil
 }
 
-func (s *Store) GetIdempotency(scope, key string, out any) (bool, error) {
+func (s *SQLiteStore) GetIdempotency(scope, key string, out any) (bool, error) {
 	var raw string
 	err := s.db.QueryRow(`SELECT result_json FROM harness_idempotency WHERE scope=? AND idem_key=?`, scope, key).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -457,11 +436,37 @@ func (s *Store) GetIdempotency(scope, key string, out any) (bool, error) {
 	return true, nil
 }
 
-func (s *Store) PutMemory(auth AuthContext, record MemoryRecord) error {
+func (s *SQLiteStore) PutMemory(auth AuthContext, record MemoryRecord) error {
 	tags, _ := canonical(record.Tags)
 	_, err := s.db.Exec(`INSERT INTO harness_memories(memory_id,tenant_id,subject_id,memory_type,namespace,memory_key,content,tags_json,importance,confidence,version,source,created_at,expires_at,supersedes,tombstone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		record.MemoryID, auth.TenantID, auth.SubjectID, record.MemoryType, record.Namespace, record.Key, record.Content, string(tags), record.Importance, record.Confidence, record.Version, record.Source, record.CreatedAt, nullable(record.ExpiresAt), nullable(record.Supersedes), boolInt(record.Tombstone))
 	return err
+}
+
+// PutMemoryVersioned inserts a memory record only when the latest live version
+// for the same (tenant, subject, namespace, key) chain equals expectedVersion.
+// The read and the insert share one transaction, so two racing writers cannot
+// both publish version n+1.
+func (s *SQLiteStore) PutMemoryVersioned(auth AuthContext, record MemoryRecord, expectedVersion int) (bool, error) {
+	tags, _ := canonical(record.Tags)
+	ok := false
+	err := s.withTx(func(tx *sql.Tx) error {
+		var current int
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(version),0) FROM harness_memories WHERE tenant_id=? AND subject_id=? AND namespace=? AND memory_key=? AND tombstone=0`,
+			auth.TenantID, auth.SubjectID, record.Namespace, record.Key).Scan(&current); err != nil {
+			return err
+		}
+		if current != expectedVersion {
+			return nil
+		}
+		if _, err := tx.Exec(`INSERT INTO harness_memories(memory_id,tenant_id,subject_id,memory_type,namespace,memory_key,content,tags_json,importance,confidence,version,source,created_at,expires_at,supersedes,tombstone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			record.MemoryID, auth.TenantID, auth.SubjectID, record.MemoryType, record.Namespace, record.Key, record.Content, string(tags), record.Importance, record.Confidence, record.Version, record.Source, record.CreatedAt, nullable(record.ExpiresAt), nullable(record.Supersedes), boolInt(record.Tombstone)); err != nil {
+			return err
+		}
+		ok = true
+		return nil
+	})
+	return ok, err
 }
 
 func nullable(value string) any {
@@ -477,7 +482,7 @@ func boolInt(value bool) int {
 	return 0
 }
 
-func (s *Store) MemoryRecords(auth AuthContext, namespace string) ([]MemoryRecord, error) {
+func (s *SQLiteStore) MemoryRecords(auth AuthContext, namespace string) ([]MemoryRecord, error) {
 	query := `SELECT memory_id,memory_type,namespace,memory_key,content,tags_json,importance,confidence,version,source,created_at,COALESCE(expires_at,''),COALESCE(supersedes,''),tombstone FROM harness_memories WHERE tenant_id=? AND subject_id=?`
 	args := []any{auth.TenantID, auth.SubjectID}
 	if namespace != "" {
@@ -507,7 +512,7 @@ func (s *Store) MemoryRecords(auth AuthContext, namespace string) ([]MemoryRecor
 	return result, rows.Err()
 }
 
-func (s *Store) TombstoneMemory(auth AuthContext, id string) (bool, error) {
+func (s *SQLiteStore) TombstoneMemory(auth AuthContext, id string) (bool, error) {
 	result, err := s.db.Exec(`UPDATE harness_memories SET tombstone=1 WHERE memory_id=? AND tenant_id=? AND subject_id=?`, id, auth.TenantID, auth.SubjectID)
 	if err != nil {
 		return false, err
@@ -516,9 +521,9 @@ func (s *Store) TombstoneMemory(auth AuthContext, id string) (bool, error) {
 	return n == 1, nil
 }
 
-func (s *Store) AcquireLease(resourceKey, ownerID, leaseID string, ttl time.Duration) (bool, error) {
-	now := time.Now().UnixNano() / 1e9
-	expires := float64(now) + ttl.Seconds()
+func (s *SQLiteStore) AcquireLease(resourceKey, ownerID, leaseID string, ttl time.Duration) (bool, error) {
+	now := float64(s.clock.Now().UnixNano()) / 1e9
+	expires := now + ttl.Seconds()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Expired leases are eligible for replacement.  The conditional delete is
@@ -533,7 +538,7 @@ func (s *Store) AcquireLease(resourceKey, ownerID, leaseID string, ttl time.Dura
 		}
 	}()
 	_, _ = tx.Exec(`DELETE FROM harness_leases WHERE resource_key=? AND expires_at<=?`, resourceKey, float64(now))
-	_, err = tx.Exec(`INSERT INTO harness_leases(lease_id,resource_key,owner_id,expires_at,acquired_at) VALUES(?,?,?,?,?)`, leaseID, resourceKey, ownerID, expires, UTCNow())
+	_, err = tx.Exec(`INSERT INTO harness_leases(lease_id,resource_key,owner_id,expires_at,acquired_at) VALUES(?,?,?,?,?)`, leaseID, resourceKey, ownerID, expires, s.now())
 	if err != nil {
 		_ = tx.Rollback()
 		return false, nil
@@ -542,8 +547,9 @@ func (s *Store) AcquireLease(resourceKey, ownerID, leaseID string, ttl time.Dura
 	return err == nil, err
 }
 
-func (s *Store) RenewLease(leaseID, ownerID string, ttl time.Duration) (bool, error) {
-	result, err := s.db.Exec(`UPDATE harness_leases SET expires_at=? WHERE lease_id=? AND owner_id=? AND expires_at>?`, float64(time.Now().UnixNano()/1e9)+ttl.Seconds(), leaseID, ownerID, float64(time.Now().UnixNano()/1e9))
+func (s *SQLiteStore) RenewLease(leaseID, ownerID string, ttl time.Duration) (bool, error) {
+	now := float64(s.clock.Now().UnixNano()) / 1e9
+	result, err := s.db.Exec(`UPDATE harness_leases SET expires_at=? WHERE lease_id=? AND owner_id=? AND expires_at>?`, now+ttl.Seconds(), leaseID, ownerID, now)
 	if err != nil {
 		return false, err
 	}
@@ -551,7 +557,7 @@ func (s *Store) RenewLease(leaseID, ownerID string, ttl time.Duration) (bool, er
 	return n == 1, nil
 }
 
-func (s *Store) ReleaseLease(leaseID, ownerID string) (bool, error) {
+func (s *SQLiteStore) ReleaseLease(leaseID, ownerID string) (bool, error) {
 	result, err := s.db.Exec(`DELETE FROM harness_leases WHERE lease_id=? AND owner_id=?`, leaseID, ownerID)
 	if err != nil {
 		return false, err
@@ -560,7 +566,7 @@ func (s *Store) ReleaseLease(leaseID, ownerID string) (bool, error) {
 	return n == 1, nil
 }
 
-func (s *Store) ReleaseResourceLease(resourceKey, ownerID string) (bool, error) {
+func (s *SQLiteStore) ReleaseResourceLease(resourceKey, ownerID string) (bool, error) {
 	result, err := s.db.Exec(`DELETE FROM harness_leases WHERE resource_key=? AND owner_id=?`, resourceKey, ownerID)
 	if err != nil {
 		return false, err
@@ -573,7 +579,7 @@ func (s *Store) ReleaseResourceLease(resourceKey, ownerID string) (bool, error) 
 // with the same id is only accepted when its content digest matches; this
 // prevents a retried tool from silently replacing evidence with a different
 // value.
-func (s *Store) PutArtifact(auth AuthContext, artifactID string, content map[string]any) (ArtifactRecord, error) {
+func (s *SQLiteStore) PutArtifact(auth AuthContext, artifactID string, content map[string]any) (ArtifactRecord, error) {
 	if artifactID == "" {
 		return ArtifactRecord{}, errors.New("ARTIFACT_ID_REQUIRED")
 	}
@@ -588,7 +594,7 @@ func (s *Store) PutArtifact(auth AuthContext, artifactID string, content map[str
 	if err != nil {
 		return ArtifactRecord{}, err
 	}
-	record := ArtifactRecord{ArtifactID: artifactID, TenantID: auth.TenantID, SubjectID: auth.SubjectID, Content: content, SHA256: digest, CreatedAt: UTCNow()}
+	record := ArtifactRecord{ArtifactID: artifactID, TenantID: auth.TenantID, SubjectID: auth.SubjectID, Content: content, SHA256: digest, CreatedAt: s.now()}
 	err = s.withTx(func(tx *sql.Tx) error {
 		var existingJSON, existingHash, createdAt string
 		err := tx.QueryRow(`SELECT content_json,sha256,created_at FROM harness_artifacts WHERE tenant_id=? AND subject_id=? AND artifact_id=?`, auth.TenantID, auth.SubjectID, artifactID).Scan(&existingJSON, &existingHash, &createdAt)
@@ -617,7 +623,7 @@ func (s *Store) PutArtifact(auth AuthContext, artifactID string, content map[str
 // GetArtifact reads an artifact under the same tenant/subject boundary used
 // by the tool runtime. It deliberately returns a boolean so callers can map a
 // missing artifact to a model-visible observation instead of a store error.
-func (s *Store) GetArtifact(auth AuthContext, artifactID string) (ArtifactRecord, bool, error) {
+func (s *SQLiteStore) GetArtifact(auth AuthContext, artifactID string) (ArtifactRecord, bool, error) {
 	var record ArtifactRecord
 	var contentJSON string
 	err := s.db.QueryRow(`SELECT content_json,sha256,created_at FROM harness_artifacts WHERE tenant_id=? AND subject_id=? AND artifact_id=?`, auth.TenantID, auth.SubjectID, artifactID).Scan(&contentJSON, &record.SHA256, &record.CreatedAt)
@@ -636,12 +642,12 @@ func (s *Store) GetArtifact(auth AuthContext, artifactID string) (ArtifactRecord
 	return record, true, nil
 }
 
-func (s *Store) PutFeedback(signal FeedbackSignal) error {
+func (s *SQLiteStore) PutFeedback(signal FeedbackSignal) error {
 	if signal.FeedbackID == "" {
 		signal.FeedbackID = NewID("FDBK")
 	}
 	if signal.CreatedAt == "" {
-		signal.CreatedAt = UTCNow()
+		signal.CreatedAt = s.now()
 	}
 	metadata, err := canonical(signal.Metadata)
 	if err != nil {
@@ -651,7 +657,7 @@ func (s *Store) PutFeedback(signal FeedbackSignal) error {
 	return err
 }
 
-func (s *Store) Feedback(tenantID string) ([]FeedbackSignal, error) {
+func (s *SQLiteStore) Feedback(tenantID string) ([]FeedbackSignal, error) {
 	rows, err := s.db.Query(`SELECT feedback_id,task_id,tenant_id,subject_id,source,stage,outcome,category,rating,comment,variant,cohort,metadata_json,created_at FROM harness_feedback WHERE tenant_id=? ORDER BY created_at,feedback_id`, tenantID)
 	if err != nil {
 		return nil, err

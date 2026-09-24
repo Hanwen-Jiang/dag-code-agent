@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"agent-harness/packages/sandbox"
-	"agent-harness/packages/sandbox/wasi"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/sandbox"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/sandbox/wasi"
 )
 
 func loadWasm(t *testing.T) []byte {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -34,28 +35,95 @@ type RunResult struct {
 	Metrics         map[string]float64 `json:"metrics"`
 }
 
+// Runtime executes agent tasks against a durable journal.
+//
+// The fields are unexported on purpose. Every durable fact the runtime
+// publishes must be written through the journal, so that materialized state is
+// never updated without the matching event. Use the read-only accessors for
+// inspection and build the runtime with New + options to change collaborators.
 type Runtime struct {
-	Store    *Store
-	Model    ModelAdapter
-	Tools    *ToolRuntime
-	Context  *ContextBuilder
-	Memory   *MemoryManager
-	Planner  Planner
-	Verifier VerifyFunc
-	Budget   *BudgetLedger
+	store          CoreStore
+	journal        *Journal
+	model          ModelAdapter
+	tools          *ToolRuntime
+	contextBuilder *ContextBuilder
+	memory         *MemoryManager
+	planner        Planner
+	verifier       VerifyFunc
+	budget         *BudgetLedger
+	clock          Clock
+	logger         *slog.Logger
+	ownsStore      bool
+
 	mu       sync.Mutex
 	loopSeen map[string]map[string]int
 }
 
-func NewRuntime(store *Store, model ModelAdapter, tools *ToolRuntime, contextBuilder *ContextBuilder, memory *MemoryManager) *Runtime {
-	return &Runtime{Store: store, Model: model, Tools: tools, Context: contextBuilder, Memory: memory, Planner: RulePlanner{}, Budget: &BudgetLedger{}, loopSeen: map[string]map[string]int{}}
+// Store returns the persistence backend (read-only use).
+func (r *Runtime) Store() CoreStore { return r.store }
+
+// Journal returns the event journal owned by this runtime.
+func (r *Runtime) Journal() *Journal { return r.journal }
+
+// Model returns the configured model adapter.
+func (r *Runtime) Model() ModelAdapter { return r.model }
+
+// Tools returns the tool runtime.
+func (r *Runtime) Tools() *ToolRuntime { return r.tools }
+
+// ContextBuilder returns the context compiler.
+func (r *Runtime) ContextBuilder() *ContextBuilder { return r.contextBuilder }
+
+// Memory returns the memory manager, if one is wired.
+func (r *Runtime) Memory() *MemoryManager { return r.memory }
+
+// Clock returns the time source used by this runtime.
+func (r *Runtime) Clock() Clock { return r.clock }
+
+// SetModel replaces the model adapter. Unlike the exported field this
+// replaces, the swap is guarded so it cannot interleave with a running turn.
+func (r *Runtime) SetModel(model ModelAdapter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.model = model
+}
+
+// SetVerifier replaces the output verifier.
+func (r *Runtime) SetVerifier(verifier VerifyFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.verifier = verifier
+}
+
+// Close releases the store when the runtime created it. A store supplied with
+// WithStore is owned by the embedder and is left open.
+func (r *Runtime) Close() error {
+	if !r.ownsStore || r.store == nil {
+		return nil
+	}
+	return r.store.Close()
+}
+
+// NewRuntime builds a runtime from explicit collaborators.
+//
+// Deprecated: use New with WithStore/WithModel/WithTools/WithContextBuilder/
+// WithMemoryManager. This constructor is retained for one minor cycle.
+func NewRuntime(store CoreStore, model ModelAdapter, tools *ToolRuntime, contextBuilder *ContextBuilder, memory *MemoryManager) (*Runtime, error) {
+	return New(
+		WithStore(store),
+		WithModel(model),
+		WithTools(tools),
+		WithContextBuilder(contextBuilder),
+		WithMemoryManager(memory),
+	)
 }
 
 // commitEvent is the only path the agent loop uses to publish durable
-// lifecycle facts. Keeping the event append next to the materialized state
-// update makes the model/tool boundary replayable after a worker restart.
+// lifecycle facts. The journal computes the chain fields and the store
+// enforces the optimistic-concurrency preconditions, so a materialized state
+// can never be published without the matching event.
 func (r *Runtime) commitEvent(state *TaskState, eventType string, payload map[string]any) error {
-	_, err := r.Store.CommitStateEvent(*state, eventType, payload, nil, nil)
+	_, err := r.journal.Commit(*state, eventType, payload)
 	return err
 }
 
@@ -85,7 +153,7 @@ func (r *Runtime) Run(ctx context.Context, request TaskRequest, auth AuthContext
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing, _, err := r.Store.GetTask(request.TaskID); err == nil {
+	if existing, _, err := r.store.GetTask(request.TaskID); err == nil {
 		stored := requestFromState(existing)
 		if stored.Goal != request.Goal || stored.TenantID != request.TenantID || stored.SubjectID != request.SubjectID {
 			return failedStateResult(existing, &RuntimeError{Code: "TASK_IDENTITY_MISMATCH", Message: "task id is already bound to another goal or identity", Category: "AUTH"})
@@ -94,15 +162,15 @@ func (r *Runtime) Run(ctx context.Context, request TaskRequest, auth AuthContext
 	}
 	state := TaskState{TaskID: request.TaskID, Goal: request.Goal, TenantID: request.TenantID, SubjectID: request.SubjectID, Status: TaskReady, Metadata: map[string]any{"request": request}}
 	state.Normalize()
-	if r.Planner != nil {
-		state.CurrentPlan = r.Planner.Plan(request, state)
+	if r.planner != nil {
+		state.CurrentPlan = r.planner.Plan(request, state)
 	}
-	if _, err := r.Store.CreateTaskWithEvent(state, "TASK_ACCEPTED", map[string]any{"goal": request.Goal, "tenant_id": request.TenantID, "subject_id": request.SubjectID}); err != nil {
+	if _, err := r.journal.Create(state, "TASK_ACCEPTED", map[string]any{"goal": request.Goal, "tenant_id": request.TenantID, "subject_id": request.SubjectID}); err != nil {
 		return failedResult(request, err)
 	}
 	if len(state.CurrentPlan) > 0 {
 		state.Status = TaskRunning
-		_, _ = r.Store.CommitStateEvent(state, "PLAN_COMPILED", map[string]any{"steps": state.CurrentPlan}, nil, nil)
+		_, _ = r.journal.Commit(state, "PLAN_COMPILED", map[string]any{"steps": state.CurrentPlan})
 	}
 	return r.continueRun(ctx, request.TaskID, auth)
 }
@@ -123,7 +191,7 @@ func validateIdentity(request TaskRequest, auth AuthContext) error {
 }
 
 func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthContext) RunResult {
-	state, _, err := r.Store.GetTask(taskID)
+	state, _, err := r.store.GetTask(taskID)
 	if err != nil {
 		return failedResult(TaskRequest{TaskID: taskID}, err)
 	}
@@ -166,7 +234,7 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 		}); err != nil {
 			return r.failAndCommit(state, "STORE", err)
 		}
-		packet, err := r.Context.Build(request, auth, state, nil)
+		packet, err := r.contextBuilder.Build(request, auth, state, nil)
 		if err != nil {
 			return r.failAndCommit(state, "CONTEXT", err)
 		}
@@ -176,7 +244,7 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 		if err := r.commitEvent(&state, "CONTEXT_COMPILED", map[string]any{
 			"turn_id":          state.CurrentTurnID,
 			"step":             stepNumber,
-			"compiler_version": r.Context.CompilerVersion,
+			"compiler_version": r.contextBuilder.CompilerVersion,
 			"estimated_tokens": packet.EstimatedTokens,
 			"budget_tokens":    packet.BudgetTokens,
 			"prefix_cache_key": packet.PrefixCacheKey,
@@ -197,7 +265,7 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 			return r.failAndCommit(state, "STORE", err)
 		}
 		started := time.Now()
-		response, err := r.Model.Complete(ctx, modelRequest)
+		response, err := r.model.Complete(ctx, modelRequest)
 		if err != nil {
 			category := "MODEL"
 			if me, ok := err.(*ModelError); ok && !me.Retryable {
@@ -223,8 +291,8 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 		}); err != nil {
 			return r.failAndCommit(state, "STORE", err)
 		}
-		if r.Budget != nil {
-			if err := r.Budget.Charge(response.Usage, len(response.ToolCalls)); err != nil {
+		if r.budget != nil {
+			if err := r.budget.Charge(response.Usage, len(response.ToolCalls)); err != nil {
 				return r.failAndCommit(state, "BUDGET", err)
 			}
 		}
@@ -255,7 +323,7 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 				if err := r.commitEvent(&state, "TOOL_INVOKED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "call": toolCallPayload(call)}); err != nil {
 					return r.failAndCommit(state, "STORE", err)
 				}
-				result := r.Tools.Execute(ctx, call, auth)
+				result := r.tools.Execute(ctx, call, auth)
 				state.ToolCalls++
 				observation := map[string]any{"tool": call.Name, "call_id": call.CallID, "status": result.Status, "value": result.Value, "error_code": result.ErrorCode, "attempts": result.Attempts}
 				toolObservations = append(toolObservations, observation)
@@ -288,8 +356,8 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 		if err := ValidateStructured(response.Text, request.ResponseSchema); err != nil {
 			return r.failAndCommit(state, "STRUCTURED_OUTPUT", err)
 		}
-		if r.Verifier != nil {
-			if err := r.Verifier(state, response.Text); err != nil {
+		if r.verifier != nil {
+			if err := r.verifier(state, response.Text); err != nil {
 				state.RetryCount++
 				state.LastError = map[string]any{"code": "VERIFIER_FAILED", "message": err.Error()}
 				state.Observations = append(state.Observations, state.LastError)
@@ -308,8 +376,8 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 		state.Status = TaskCompleted
 		state.FinalAnswer = response.Text
 		state.Observations = append(state.Observations, map[string]any{"type": "final", "text": response.Text})
-		if r.Memory != nil {
-			_, _ = r.Memory.Write(auth, "episodic", "tasks", taskID, response.Text, nil, .8, "", 0)
+		if r.memory != nil {
+			_, _ = r.memory.Write(auth, "episodic", "tasks", taskID, response.Text, nil, .8, "", 0)
 		}
 		if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "final"}); err != nil {
 			return r.failAndCommit(state, "STORE", err)
@@ -369,7 +437,7 @@ func (r *Runtime) result(state TaskState, answer string) RunResult {
 	return r.resultWithFailure(state, "")
 }
 func (r *Runtime) resultWithFailure(state TaskState, category string) RunResult {
-	events, _ := r.Store.Events(state.TaskID)
+	events, _ := r.store.Events(state.TaskID)
 	metrics := map[string]float64{
 		"model_rounds":        float64(state.ModelRound),
 		"tool_calls":          float64(state.ToolCalls),
@@ -387,7 +455,7 @@ func (r *Runtime) resultWithFailure(state TaskState, category string) RunResult 
 func (r *Runtime) Resume(ctx context.Context, taskID, userMessage string, auth AuthContext) RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	state, _, err := r.Store.GetTask(taskID)
+	state, _, err := r.store.GetTask(taskID)
 	if err != nil {
 		return failedResult(TaskRequest{TaskID: taskID}, err)
 	}
@@ -402,7 +470,7 @@ func (r *Runtime) Resume(ctx context.Context, taskID, userMessage string, auth A
 	delete(state.Metadata, "pending_user")
 	state.UserMessages = append(state.UserMessages, userMessage)
 	state.Observations = append(state.Observations, map[string]any{"type": "user_response", "message": userMessage})
-	if _, err := r.Store.CommitStateEvent(state, "USER_GATE_RESUMED", map[string]any{"message": userMessage}, nil, nil); err != nil {
+	if _, err := r.journal.Commit(state, "USER_GATE_RESUMED", map[string]any{"message": userMessage}); err != nil {
 		return r.failAndCommit(state, "STORE", err)
 	}
 	return r.continueRun(ctx, taskID, auth)
@@ -414,7 +482,7 @@ func (r *Runtime) Resume(ctx context.Context, taskID, userMessage string, auth A
 func (r *Runtime) SendMessage(ctx context.Context, taskID, userMessage string, auth AuthContext) RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	state, _, err := r.Store.GetTask(taskID)
+	state, _, err := r.store.GetTask(taskID)
 	if err != nil {
 		return failedResult(TaskRequest{TaskID: taskID}, err)
 	}
@@ -431,7 +499,7 @@ func (r *Runtime) SendMessage(ctx context.Context, taskID, userMessage string, a
 	delete(state.Metadata, "pending_user")
 	state.UserMessages = append(state.UserMessages, userMessage)
 	state.Observations = append(state.Observations, map[string]any{"type": "user_message", "message": userMessage})
-	if _, err := r.Store.CommitStateEvent(state, "USER_MESSAGE_RECEIVED", map[string]any{"message": userMessage}, nil, nil); err != nil {
+	if _, err := r.journal.Commit(state, "USER_MESSAGE_RECEIVED", map[string]any{"message": userMessage}); err != nil {
 		return r.failAndCommit(state, "STORE", err)
 	}
 	return r.continueRun(ctx, taskID, auth)
@@ -439,7 +507,7 @@ func (r *Runtime) SendMessage(ctx context.Context, taskID, userMessage string, a
 func (r *Runtime) Cancel(taskID string, auth AuthContext) RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	state, _, err := r.Store.GetTask(taskID)
+	state, _, err := r.store.GetTask(taskID)
 	if err != nil {
 		return failedResult(TaskRequest{TaskID: taskID}, err)
 	}
@@ -452,10 +520,10 @@ func (r *Runtime) Cancel(taskID string, auth AuthContext) RunResult {
 	}
 	state.Status = TaskCancelled
 	state.LastError = map[string]any{"code": "CANCELLED", "message": "cancelled by caller"}
-	_, _ = r.Store.CommitStateEvent(state, "TASK_CANCELLED", state.LastError, nil, nil)
+	_, _ = r.journal.Commit(state, "TASK_CANCELLED", state.LastError)
 	return r.result(state, "")
 }
 func (r *Runtime) Recover(taskID string) (TaskState, error) {
-	return r.Store.ReplayState(taskID)
+	return r.journal.ReplayState(taskID)
 }
-func (r *Runtime) Replay(taskID string) ([]Event, error) { return r.Store.Replay(taskID) }
+func (r *Runtime) Replay(taskID string) ([]Event, error) { return r.journal.Replay(taskID) }

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"agent-harness/packages/embedding"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/embedding"
 )
 
 // LLMClient generates text from a prompt. Any chat/completion client can

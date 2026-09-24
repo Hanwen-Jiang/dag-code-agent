@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"os"
 
-	"agent-harness/internal/harness"
-	"agent-harness/internal/httpapi"
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/httpapi"
 )
 
 func main() {

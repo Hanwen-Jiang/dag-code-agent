@@ -26,7 +26,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"agent-harness/packages/embedding"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/embedding"
 )
 
 // ---------- Config ----------

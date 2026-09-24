@@ -1,4 +1,4 @@
-module agent-harness
+module github.com/Hanwen-Jiang/dag-code-agent
 
 go 1.26.0
 

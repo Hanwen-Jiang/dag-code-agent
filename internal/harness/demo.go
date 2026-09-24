@@ -9,7 +9,8 @@ import (
 )
 
 type DemoEnvironment struct {
-	Store    *Store
+	Store    Store
+	Journal  *Journal
 	Runtime  *Runtime
 	Request  TaskRequest
 	Auth     AuthContext
@@ -25,7 +26,7 @@ type DemoEnvironment struct {
 }
 
 func BuildDemoEnvironment() (*DemoEnvironment, error) {
-	store, err := NewStore(":memory:")
+	store, err := NewSQLiteStore(":memory:")
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +44,7 @@ func BuildDemoEnvironment() (*DemoEnvironment, error) {
 // by both the CLI fixture and the HTTP session API. The store is supplied by
 // the caller so a server can keep one durable control-plane database while
 // each run still owns its model, tool registry and artifact namespace.
-func BuildDemoEnvironmentWithStore(store *Store, request TaskRequest, auth AuthContext) (*DemoEnvironment, error) {
+func BuildDemoEnvironmentWithStore(store Store, request TaskRequest, auth AuthContext) (*DemoEnvironment, error) {
 	if store == nil {
 		return nil, errors.New("HARNESS_STORE_REQUIRED")
 	}
@@ -104,29 +105,40 @@ func BuildDemoEnvironmentWithStore(store *Store, request TaskRequest, auth AuthC
 	prefix := NewPrefixCache(8)
 	model := NewScriptedModel([]ModelResponse{{ToolCalls: []ToolCall{{CallID: "m1", Name: "search_memory", Arguments: map[string]any{"query": "Harness"}}}}, {ToolCalls: []ToolCall{{CallID: "m2", Name: "write_artifact", Arguments: map[string]any{"artifact_id": "ART-HARNESS-DEMO", "content": "verified artifact", "idempotency_key": "artifact-1"}}}}, {ToolCalls: []ToolCall{{CallID: "m3", Name: "read_artifact", Arguments: map[string]any{"artifact_id": "ART-HARNESS-DEMO"}}}}, {Text: `{"status":"completed","artifact_id":"ART-HARNESS-DEMO","verified":true}`, FinishReason: "stop"}})
 	model.ModelName = "scripted-harness"
-	builder := NewContextBuilder(memory, skills, registry, prefix)
-	runtime := NewRuntime(store, model, NewToolRuntime(registry, store), builder, memory)
-	mcp := NewMCPClient(NewMCPServer(runtime.Tools), auth)
-	runtime.Verifier = func(_ TaskState, text string) error {
-		var output map[string]any
-		if err := json.Unmarshal([]byte(text), &output); err != nil {
-			return err
-		}
-		if output["verified"] != true {
-			return errors.New("evidence not verified")
-		}
-		if output["artifact_id"] != "ART-HARNESS-DEMO" {
-			return errors.New("wrong artifact")
-		}
-		return nil
+	// The demo is the reference composition for embedders: every collaborator
+	// is supplied through an option instead of a positional constructor.
+	runtime, err := New(
+		WithStore(store),
+		WithModel(model),
+		WithToolRegistry(registry),
+		WithSkills(skills),
+		WithPrefixCache(prefix),
+		WithMemoryManager(memory),
+		WithVerifier(func(_ TaskState, text string) error {
+			var output map[string]any
+			if err := json.Unmarshal([]byte(text), &output); err != nil {
+				return err
+			}
+			if output["verified"] != true {
+				return errors.New("evidence not verified")
+			}
+			if output["artifact_id"] != "ART-HARNESS-DEMO" {
+				return errors.New("wrong artifact")
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		return nil, err
 	}
-	return &DemoEnvironment{Store: store, Runtime: runtime, Request: request, Auth: auth, Model: model, Adapter: model, Provider: ModelProviderStatus{Provider: "scripted", Mode: "offline", Model: model.Name(), Configured: true, Detail: "离线 Harness fixture，不调用外部模型"}, Prefix: prefix, Registry: registry, Memory: memory, Skills: skills, Context: builder, MCP: mcp}, nil
+	mcp := NewMCPClient(NewMCPServer(runtime.Tools()), auth)
+	return &DemoEnvironment{Store: store, Journal: runtime.Journal(), Runtime: runtime, Request: request, Auth: auth, Model: model, Adapter: model, Provider: ModelProviderStatus{Provider: "scripted", Mode: "offline", Model: model.Name(), Configured: true, Detail: "离线 Harness fixture，不调用外部模型"}, Prefix: prefix, Registry: registry, Memory: memory, Skills: skills, Context: runtime.ContextBuilder(), MCP: mcp}, nil
 }
 
 // BuildChatEnvironmentWithStore keeps the same tools, memory and evidence
 // plumbing as the offline fixture but swaps in a conversational adapter and
 // removes the demo-only structured verifier.
-func BuildChatEnvironmentWithStore(store *Store, request TaskRequest, auth AuthContext) (*DemoEnvironment, error) {
+func BuildChatEnvironmentWithStore(store Store, request TaskRequest, auth AuthContext) (*DemoEnvironment, error) {
 	env, err := BuildDemoEnvironmentWithStore(store, request, auth)
 	if err != nil {
 		return nil, err
@@ -143,8 +155,8 @@ func BuildChatEnvironmentWithStore(store *Store, request TaskRequest, auth AuthC
 	if effort := strings.TrimSpace(os.Getenv("HARNESS_MODEL_REASONING_EFFORT")); effort != "" {
 		env.Request.ReasoningEffort = effort
 	}
-	env.Runtime.Model = adapter
-	env.Runtime.Verifier = nil
+	env.Runtime.SetModel(adapter)
+	env.Runtime.SetVerifier(nil)
 	env.Request.ResponseSchema = nil
 	return env, nil
 }
@@ -167,9 +179,9 @@ func (e *DemoEnvironment) Snapshot(result RunResult) map[string]any {
 	mcpTools, toolsErr := e.MCP.ListTools()
 	memoryRecords, memoryErr := e.Memory.Retrieve(e.Auth, e.Request.Goal, "")
 	resolvedSkills := e.Skills.Resolve(e.Request.Goal, e.Auth)
-	checkpoint, checkpointErr := e.Store.LatestCheckpoint(result.TaskID)
-	replayed, replayErr := e.Store.Replay(result.TaskID)
-	if _, stateReplayErr := e.Store.ReplayState(result.TaskID); replayErr == nil && stateReplayErr != nil {
+	checkpoint, checkpointErr := e.Journal.Store().LatestCheckpoint(result.TaskID)
+	replayed, replayErr := e.Journal.Replay(result.TaskID)
+	if _, stateReplayErr := e.Journal.ReplayState(result.TaskID); replayErr == nil && stateReplayErr != nil {
 		replayErr = stateReplayErr
 	}
 

@@ -8,8 +8,8 @@ import (
 	"log"
 	"os"
 
-	"agent-harness/internal/dag"
-	"agent-harness/internal/harness"
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/dag"
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
 )
 
 func main() {
@@ -22,7 +22,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	store, err := harness.NewStore(":memory:")
+	store, err := harness.NewSQLiteStore(":memory:")
 	if err != nil {
 		log.Fatal(err)
 	}

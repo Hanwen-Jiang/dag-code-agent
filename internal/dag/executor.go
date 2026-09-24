@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	h "agent-harness/internal/harness"
+	h "github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
 )
 
 const (
@@ -244,19 +244,20 @@ func (r Report) Metrics() map[string]float64 {
 
 type Executor struct {
 	Manifest Manifest
-	Store    *h.Store
+	Store    h.Store
+	Journal  *h.Journal
 	Factory  RunnerFactory
 	mu       sync.Mutex
 	commits  map[string]int
 }
 
-func NewExecutor(manifest Manifest, store *h.Store, factory RunnerFactory) (*Executor, error) {
+func NewExecutor(manifest Manifest, store h.Store, factory RunnerFactory) (*Executor, error) {
 	if err := ValidateManifest(manifest); err != nil {
 		return nil, err
 	}
 	if store == nil {
 		var err error
-		store, err = h.NewStore(":memory:")
+		store, err = h.NewSQLiteStore(":memory:")
 		if err != nil {
 			return nil, err
 		}
@@ -264,7 +265,7 @@ func NewExecutor(manifest Manifest, store *h.Store, factory RunnerFactory) (*Exe
 	if factory == nil {
 		factory = NewDeterministicRunnerFactory(nil)
 	}
-	return &Executor{Manifest: manifest, Store: store, Factory: factory, commits: map[string]int{}}, nil
+	return &Executor{Manifest: manifest, Store: store, Journal: h.NewJournal(store, h.SystemClock()), Factory: factory, commits: map[string]int{}}, nil
 }
 func (e *Executor) initial(runID string) DAGState {
 	s := DAGState{RunID: runID, TaskID: runID, ManifestID: e.Manifest.ManifestID, SpecHash: e.Manifest.SpecHash, Status: "RUNNING"}
@@ -294,7 +295,7 @@ func (e *Executor) persist(s DAGState, task h.TaskState, event string, payload m
 		task.Status = h.TaskFailed
 	}
 	task.Metadata["dag_state"] = encodeDAG(s)
-	_, err := e.Store.CommitStateEvent(task, event, payload, nil, nil)
+	_, err := e.Journal.Commit(task, event, payload)
 	if err != nil {
 		return err
 	}
@@ -308,7 +309,7 @@ func (e *Executor) create(runID string) (DAGState, error) {
 	s := e.initial(runID)
 	task := h.TaskState{TaskID: runID, Goal: e.Manifest.Objective(), TenantID: "dag-tenant", SubjectID: "scheduler", Status: h.TaskRunning, Metadata: map[string]any{"dag_state": encodeDAG(s), "request": h.TaskRequest{TaskID: runID, Goal: e.Manifest.Objective(), TenantID: "dag-tenant", SubjectID: "scheduler", ContextWindow: 4096}}}
 	task.Normalize()
-	_, err := e.Store.CreateTaskWithEvent(task, "DAG_ACCEPTED", map[string]any{"manifest_id": e.Manifest.ManifestID, "spec_hash": e.Manifest.SpecHash})
+	_, err := e.Journal.Create(task, "DAG_ACCEPTED", map[string]any{"manifest_id": e.Manifest.ManifestID, "spec_hash": e.Manifest.SpecHash})
 	return s, err
 }
 
@@ -674,7 +675,7 @@ func (e *Executor) Cancel(runID, reason string) (Report, error) {
 	}
 	return e.report(s), nil
 }
-func (e *Executor) Replay(runID string) ([]h.Event, error) { return e.Store.Replay(runID) }
+func (e *Executor) Replay(runID string) ([]h.Event, error) { return e.Journal.Replay(runID) }
 
 // Report reads an existing run without creating or advancing it.
 func (e *Executor) Report(runID string) (Report, error) {

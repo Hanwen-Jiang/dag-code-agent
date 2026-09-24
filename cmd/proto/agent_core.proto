@@ -4,7 +4,7 @@ package agentcore;
 
 import "google/protobuf/struct.proto";
 
-option go_package = "agent-harness/proto/agent_core";
+option go_package = "github.com/Hanwen-Jiang/dag-code-agent/proto/agent_core";
 
 service AgentService {
   // Execute a single task synchronously

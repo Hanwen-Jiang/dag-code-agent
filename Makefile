@@ -39,8 +39,8 @@ server:
 
 # Regenerate gRPC/protobuf code from cmd/proto/agent_core.proto.
 proto:
-	protoc --go_out=. --go_opt=module=agent-harness \
-	       --go-grpc_out=. --go-grpc_opt=module=agent-harness \
+	protoc --go_out=. --go_opt=module=github.com/Hanwen-Jiang/dag-code-agent \
+	       --go-grpc_out=. --go-grpc_opt=module=github.com/Hanwen-Jiang/dag-code-agent \
 	       cmd/proto/agent_core.proto
 
 # Three-layer services (each degrades gracefully without external infra).

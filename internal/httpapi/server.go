@@ -13,12 +13,13 @@ import (
 	"sync"
 	"time"
 
-	"agent-harness/internal/dag"
-	"agent-harness/internal/harness"
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/dag"
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
 )
 
 type Server struct {
-	HarnessStore *harness.Store
+	HarnessStore harness.Store
+	Journal      *harness.Journal
 	Feedback     harness.FeedbackCollector
 	Provider     harness.ModelProviderStatus
 	DAGManifest  dag.Manifest
@@ -71,11 +72,11 @@ func NewHandler() (http.Handler, func(), error) {
 // NewHandlerWithPaths keeps a variadic second argument for compatibility with
 // an earlier combined demo. This package owns only the Harness control plane.
 func NewHandlerWithPaths(controlPath string, _ ...string) (http.Handler, func(), error) {
-	controlStore, err := harness.NewStore(controlPath)
+	controlStore, err := harness.NewSQLiteStore(controlPath)
 	if err != nil {
 		return nil, func() {}, err
 	}
-	server := &Server{HarnessStore: controlStore, Feedback: harness.FeedbackCollector{Store: controlStore}, Provider: harness.DescribeModelProvider(), runs: map[string]*harnessSession{}}
+	server := &Server{HarnessStore: controlStore, Journal: harness.NewJournal(controlStore, harness.SystemClock()), Feedback: harness.FeedbackCollector{Store: controlStore}, Provider: harness.DescribeModelProvider(), runs: map[string]*harnessSession{}}
 	server.DAGManifest, server.DAGLoadError = loadDAGManifest()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", server.health)
@@ -288,7 +289,7 @@ func (s *Server) getHarnessSession(taskID string) (*harnessSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.HarnessStore.ReplayState(taskID); err != nil {
+	if _, err := s.Journal.ReplayState(taskID); err != nil {
 		return nil, err
 	}
 	request := taskRequestFromState(state)
@@ -333,7 +334,7 @@ func (s *Server) currentSessionResult(session *harnessSession) harness.RunResult
 	if err != nil {
 		return harness.RunResult{TaskID: session.env.Request.TaskID, Status: harness.TaskFailed, FailureCategory: "STORE", State: state}
 	}
-	if _, replayErr := s.HarnessStore.ReplayState(state.TaskID); replayErr != nil {
+	if _, replayErr := s.Journal.ReplayState(state.TaskID); replayErr != nil {
 		state.Status = harness.TaskFailed
 		state.LastError = map[string]any{"code": "REPLAY", "message": replayErr.Error()}
 		return harness.RunResult{TaskID: state.TaskID, Status: state.Status, FailureCategory: "REPLAY", State: state}
@@ -370,7 +371,7 @@ func eventCursor(r *http.Request) int {
 	return cursor
 }
 
-func writeHarnessSSE(ctx context.Context, w http.ResponseWriter, store *harness.Store, taskID string, after int, follow bool) {
+func writeHarnessSSE(ctx context.Context, w http.ResponseWriter, store harness.CoreStore, taskID string, after int, follow bool) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")

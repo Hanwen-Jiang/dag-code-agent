@@ -19,7 +19,7 @@ import (
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
-	"agent-harness/packages/selfevolution"
+	"github.com/Hanwen-Jiang/dag-code-agent/packages/selfevolution"
 )
 
 // datasetFile mirrors the canonical evaluation dataset schema.

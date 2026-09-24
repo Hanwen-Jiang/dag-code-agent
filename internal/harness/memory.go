@@ -7,18 +7,34 @@ import (
 	"time"
 )
 
-type MemoryManager struct{ Store *Store }
+type MemoryManager struct {
+	Store MemoryStore
+	clock Clock
+}
 
-func NewMemoryManager(store *Store) *MemoryManager { return &MemoryManager{Store: store} }
+func NewMemoryManager(store MemoryStore) *MemoryManager {
+	return &MemoryManager{Store: store, clock: SystemClock()}
+}
 
+// SetClock replaces the time source used for expiry comparisons and timestamps.
+func (m *MemoryManager) SetClock(clock Clock) { m.clock = clockOrSystem(clock) }
+
+func (m *MemoryManager) now() time.Time {
+	if m.clock == nil {
+		return time.Now()
+	}
+	return m.clock.Now()
+}
+
+// Write appends the next version of a memory record.
+//
+// The version is computed here (core rule: a write supersedes the current
+// latest live record for the same key) and enforced by the backend through
+// PutMemoryVersioned, so two racing writers cannot both publish version n+1.
 func (m *MemoryManager) Write(auth AuthContext, memoryType, namespace, key, content string, tags []string, confidence float64, expiresAt string, expectedVersion int) (MemoryRecord, error) {
 	if m.Store == nil {
 		return MemoryRecord{}, errors.New("memory store is nil")
 	}
-	// Version check and insert must be one critical section; otherwise two
-	// writers can both observe the same latest record and publish version n+1.
-	m.Store.mu.Lock()
-	defer m.Store.mu.Unlock()
 	records, err := m.Store.MemoryRecords(auth, namespace)
 	if err != nil {
 		return MemoryRecord{}, err
@@ -31,27 +47,36 @@ func (m *MemoryManager) Write(auth AuthContext, memoryType, namespace, key, cont
 	}
 	version := 1
 	supersedes := ""
+	currentVersion := 0
 	if latest != nil {
 		if expectedVersion > 0 && latest.Version != expectedVersion {
 			return MemoryRecord{}, errors.New("VERSION_CONFLICT")
 		}
 		version = latest.Version + 1
 		supersedes = latest.MemoryID
+		currentVersion = latest.Version
 	} else if expectedVersion > 1 {
 		return MemoryRecord{}, errors.New("VERSION_CONFLICT")
 	}
 	if confidence <= 0 {
 		confidence = .5
 	}
-	r := MemoryRecord{MemoryID: NewID("MEM"), TenantID: auth.TenantID, SubjectID: auth.SubjectID, MemoryType: memoryType, Namespace: namespace, Key: key, Content: content, Tags: tags, Importance: .5, Confidence: confidence, Version: version, Source: "agent", CreatedAt: UTCNow(), ExpiresAt: expiresAt, Supersedes: supersedes}
-	return r, m.Store.PutMemory(auth, r)
+	r := MemoryRecord{MemoryID: NewID("MEM"), TenantID: auth.TenantID, SubjectID: auth.SubjectID, MemoryType: memoryType, Namespace: namespace, Key: key, Content: content, Tags: tags, Importance: .5, Confidence: confidence, Version: version, Source: "agent", CreatedAt: utcNow(m.clock), ExpiresAt: expiresAt, Supersedes: supersedes}
+	ok, err := m.Store.PutMemoryVersioned(auth, r, currentVersion)
+	if err != nil {
+		return MemoryRecord{}, err
+	}
+	if !ok {
+		return MemoryRecord{}, errors.New("VERSION_CONFLICT")
+	}
+	return r, nil
 }
 func (m *MemoryManager) Retrieve(auth AuthContext, query string, namespace string) ([]MemoryRecord, error) {
 	records, err := m.Store.MemoryRecords(auth, namespace)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
+	now := m.now()
 	latest := map[string]MemoryRecord{}
 	seen := map[string]bool{}
 	for _, r := range records {
@@ -102,7 +127,5 @@ func (m *MemoryManager) Forget(auth AuthContext, id string) (bool, error) {
 	if m.Store == nil {
 		return false, errors.New("memory store is nil")
 	}
-	m.Store.mu.Lock()
-	defer m.Store.mu.Unlock()
 	return m.Store.TombstoneMemory(auth, id)
 }

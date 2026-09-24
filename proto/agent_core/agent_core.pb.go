@@ -1071,7 +1071,7 @@ const file_cmd_proto_agent_core_proto_rawDesc = "" +
 	"\vExecuteTask\x12\x1d.agentcore.ExecuteTaskRequest\x1a\x1e.agentcore.ExecuteTaskResponse\x12K\n" +
 	"\x11StreamExecuteTask\x12\x1d.agentcore.ExecuteTaskRequest\x1a\x15.agentcore.TaskUpdate0\x01\x12L\n" +
 	"\vHealthCheck\x12\x1d.agentcore.HealthCheckRequest\x1a\x1e.agentcore.HealthCheckResponse\x12R\n" +
-	"\rDiscoverTools\x12\x1f.agentcore.DiscoverToolsRequest\x1a .agentcore.DiscoverToolsResponseB Z\x1eagent-harness/proto/agent_coreb\x06proto3"
+	"\rDiscoverTools\x12\x1f.agentcore.DiscoverToolsRequest\x1a .agentcore.DiscoverToolsResponseB9Z7github.com/Hanwen-Jiang/dag-code-agent/proto/agent_coreb\x06proto3"
 
 var (
 	file_cmd_proto_agent_core_proto_rawDescOnce sync.Once
