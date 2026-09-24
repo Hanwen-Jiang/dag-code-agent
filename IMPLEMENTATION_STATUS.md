@@ -112,7 +112,7 @@
 ### P1 (Should Have - 下一阶段)
 
 #### 4. Multi-Agent Coordination v2
-当前 `internal/harness/multi_agent.go` 只有骨架，需要:
+当前 `harness/multi_agent.go` 只有骨架，需要:
 - Consensus protocol (voting/debate/negotiation)
 - Role assignment (Manager/Worker/Reviewer)
 - Communication bus (NATS-based)

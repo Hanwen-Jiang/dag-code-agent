@@ -25,7 +25,7 @@ DAG 调度和验收证据。
 
 ```mermaid
 flowchart TB
-    subgraph 控制面["控制面 internal/ + cmd/agent-harness"]
+    subgraph 控制面["控制面 harness/ + cmd/agent-harness"]
         H["Harness Control Plane"]
         D["Canonical DAG Executor"]
         E[("SQLite Event/Checkpoint/Evidence")]
@@ -68,7 +68,7 @@ flowchart TB
 所有 7 个二进制由 `make build` 产出到 `bin/`，并可通过 `scripts/smoke.sh` 一键端到端验证
 （全部服务离线启动、各自降级、逐项检查，当前 **PASS: 18 FAIL: 0**）。
 
-## 核心控制面（internal/）
+## 核心控制面（harness/）
 
 模型只产生 proposal，Harness 编译上下文、执行策略、提交状态并保留可重放证据。
 Canonical DAG 是它面向长任务交付的调度模式，负责 ready set、lease、fresh attempt、
@@ -89,11 +89,11 @@ flowchart LR
 
 | 层 | 主要职责 | 代码 |
 |---|---|---|
-| Model | complete/stream、tool-call、structured output、usage、fallback | `internal/harness/model.go` |
-| Harness | loop、context、plan、budget、gate、cancel/recover | `internal/harness/runtime.go`、`context.go` |
+| Model | complete/stream、tool-call、structured output、usage、fallback | `harness/model.go` |
+| Harness | loop、context、plan、budget、gate、cancel/recover | `harness/runtime.go`、`context.go` |
 | Environment | Tool/MCP、scope、timeout、retry、idempotency、policy | `tools.go`、`policy.go` |
 | Evidence | event chain、checkpoint、trajectory、evaluation、feedback | `store.go`、`evaluation.go`、`feedback.go` |
-| Long task | manifest、activation、lease、attempt、artifact、UAT | `internal/dag/` |
+| Long task | manifest、activation、lease、attempt、artifact、UAT | `harness/dag/` |
 
 ## JD 知识点映射
 
@@ -128,10 +128,18 @@ cmd/
   self-evolution/      # 自进化层：评测 / 消融 / A/B
   xai-dashboard/       # 透明层：trace / 归因 / 可视化（内置静态 UI）
   proto/               # agent_core.proto（gRPC 契约源）
-internal/
-  harness/             # provider-neutral 控制面
-  dag/                 # canonical manifest 校验 / 执行
-  httpapi/             # JSON API 与可重放 SSE 投影
+harness/               # 【公开】控制面核心：可被外部 import 的库
+  store_iface.go       #   Store 能力接口（Task/Event/Idempotency/Memory/Lease/Artifact/Feedback）
+  journal.go           #   事件哈希链：唯一计算与校验不变量之处
+  store.go             #   SQLite 后端（默认）
+  memstore.go          #   纯 Go 内存后端（零依赖）
+  clock.go             #   Clock 抽象（System/Fixed/Stepped/Manual）
+  options.go           #   New(WithStore/WithModel/WithClock/...)
+  storetest/           #   后端一致性套件（任何 Store 实现都必须通过）
+harness/dag/           # 【公开】canonical manifest 校验 / 执行
+httpapi/               # 【公开】JSON API 与可重放 SSE 投影（New(Config)，不读 env）
+modelenv/              # 环境变量 → 模型适配器/会话（仅此处与 cmd/ 读 env）
+backends/postgres/     # 可选 Postgres 后端（独立包，保证核心不依赖 pgx）
 packages/
   sandbox/ (wasi/)     # 统一沙箱接口 + WASI/wasmtime 后端
   vectordb/            # Qdrant / pgvector / 内存 向量库 + RAG 管线
@@ -140,9 +148,11 @@ packages/
   selfevolution/       # 评测、消融、A/B、反馈、失败目录
   skills/ permissions/ loopsdetect/ multiagent/ hooks/ prompt-engine/ vector/
 proto/agent_core/      # 由 proto 生成的 Go/gRPC 代码
+examples/              # 可嵌入性证明（含独立 module embed_external）
 data/evaluation/       # 自进化固定数据集 (tasks.yaml)
 testdata/              # hello.wasm（真实 WASI 模块）
 scripts/smoke.sh       # 全栈离线端到端冒烟测试
+scripts/embed-guards.sh# 可嵌入性护栏 G1–G6（CI 强制）
 frontend/              # React + Vite + HeroUI 控制台（控制面）
 docker-compose.yml     # Temporal + Qdrant 真实基础设施（可选）
 configs/               # DAG 运行时 schema 与示例 manifest
@@ -219,6 +229,90 @@ go run ./cmd/agent-harness -mode server -addr 127.0.0.1:8080
 
 模型层 `llm-service` 则通过 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `*_BASE_URL` 配置
 provider；缺失时自动降级为本地确定性 provider。API key 只由 Go 服务端读取。
+
+## 作为库嵌入（Embedding）
+
+控制面不只是 HTTP 服务，它也是可以被外部 Go 程序 `import` 的库。模块路径：
+
+```go
+import "github.com/Hanwen-Jiang/dag-code-agent/harness"
+```
+
+最小用法（零配置：内存 SQLite + 离线确定性模型）：
+
+```go
+rt, err := harness.New()
+if err != nil {
+    log.Fatal(err)
+}
+defer rt.Close()
+
+auth := harness.AuthContext{TenantID: "local", SubjectID: "dev"}
+result := rt.Run(ctx, harness.TaskRequest{
+    TaskID: "task-1", Goal: "summarise the guarantees",
+    TenantID: auth.TenantID, SubjectID: auth.SubjectID,
+}, auth)
+
+// 事件哈希链可以在事后独立校验
+state, err := rt.Journal().ReplayState(result.TaskID)
+```
+
+协作方全部可通过 Option 替换：
+
+```go
+rt, err := harness.New(
+    harness.WithStore(myStore),          // 自定义 Store（见 harness.Store 接口）
+    harness.WithModel(myAdapter),        // 自定义 ModelAdapter
+    harness.WithClock(harness.NewManualClock(t0)), // 确定性时间
+    harness.WithTools(tools),
+    harness.WithPlanner(planner),
+    harness.WithVerifier(verify),
+)
+```
+
+把控制面挂到自己的 HTTP 路由下：
+
+```go
+handler, err := httpapi.New(httpapi.Config{
+    Store:        myStore,          // 必填，由调用方拥有生命周期
+    DAGManifest:  manifest,
+    CORSOrigins:  []string{"https://myapp.example"},
+    RoutePrefix:  "/agent",
+    SessionFactory: modelenv.FromEnv().SessionFactory(myStore),
+})
+mux.Handle("/agent/", http.StripPrefix("/agent", handler))
+```
+
+**关键设计**：事件哈希链、`_state_digest` 绑定与 replay 校验全部实现在核心
+`harness.Journal` 中，存储后端只负责「原子条件追加」（`AppendEvent` / `CreateTask`）。
+因此第三方后端**不可能**悄悄破坏链的完整性——写错只会返回 `ErrStoreConflict`。
+实现了新后端？用一致性套件自证：
+
+```go
+import "github.com/Hanwen-Jiang/dag-code-agent/harness/storetest"
+
+func TestMyStore(t *testing.T) {
+    storetest.RunAll(t, func(t *testing.T) harness.Store {
+        return myBackend(t)
+    })
+}
+```
+
+现成后端：`harness.NewSQLiteStore(path)`（默认，纯 Go 无 CGO）、
+`harness.NewInMemoryStore()`（零依赖）、`backends/postgres`（可选）。
+两者都通过全部 10 组一致性检查。
+
+可运行示例见 `examples/`：`embed_offline`、`embed_custom_store`、`embed_custom_model`，
+以及独立 module 形式的 `examples/embed_external`。
+
+```bash
+go run ./examples/embed_offline
+go run ./examples/embed_custom_store
+go run ./examples/embed_custom_model
+cd examples/embed_external && go run .
+```
+
+设计文档与迁移记录见 [`docs/embeddability-design.md`](docs/embeddability-design.md)。
 
 ## 控制面 HTTP 接口
 

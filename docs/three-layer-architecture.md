@@ -69,7 +69,7 @@ when its external dependency is unreachable, so the whole stack runs offline
 
 | Design component | Implemented in | Notes |
 |---|---|---|
-| Harness Control Plane (event hash-chain, DAG, gates) | `internal/harness`, `internal/dag`, `cmd/agent-harness` | SQLite-backed, `ReplayState` verifies the chain |
+| Harness Control Plane (event hash-chain, DAG, gates) | `harness`, `harness/dag`, `cmd/agent-harness` | SQLite-backed, `ReplayState` verifies the chain |
 | Temporal Workflow Engine + routing + priority queues | `cmd/orchestrator` | Real Temporal SDK; **local inline executor** when Temporal is down |
 | WASI Sandbox (fuel / epoch / no-network / preopens) | `packages/sandbox/wasi` (`WasiExecutor`) | Real `bytecodealliance/wasmtime-go` v15; fuel + epoch-interruption + per-run preopens + stdout/stderr capture |
 | Permission Engine / Loop Detectors | `packages/permissions`, `packages/loopsdetect` | Deterministic policy + pattern detectors |

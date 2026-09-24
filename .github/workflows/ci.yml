@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+      # The embeddability acceptance criteria (C1-C4) are machine-checked.
+      # --self-test also proves the guards can actually fail, so a broken
+      # guard cannot silently pass.
+      - name: Embeddability guards
+        run: ./scripts/embed-guards.sh --self-test
+
+      # An unrelated Go module must be able to import the public packages.
+      - name: External consumer module
+        run: cd examples/embed_external && go build -o /dev/null .
+
+      - name: Store conformance suite
+        run: go test -count=1 ./harness/storetest/
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binaries
+        run: make build
+
+      - name: Smoke test the stack
+        run: ./scripts/smoke.sh

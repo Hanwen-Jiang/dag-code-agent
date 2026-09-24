@@ -164,7 +164,7 @@ namespace 隔离；版本、`supersedes`、过期和 tombstone/forget 防止旧�
 
 ### Planning
 
-`RulePlanner` 为轻量 task 生成结构化 step。长任务使用 `internal/dag` 的 Canonical
+`RulePlanner` 为轻量 task 生成结构化 step。长任务使用 `harness/dag` 的 Canonical
 Manifest：节点、依赖、ALL/ANY/QUORUM activation、artifact contract、evidence、rework 和
 UAT 都是机器契约，不由模型自由修改。
 
@@ -212,15 +212,15 @@ feedback -> failure taxonomy -> hypothesis
 
 | 能力 | 实现 | 主要证据 |
 |---|---|---|
-| 契约、身份、hash | `internal/harness/types.go`、`store.go` | replay/tamper/conflict tests |
-| Model API/stream/fallback | `internal/harness/model.go` | adapter/router/stream tests |
+| 契约、身份、hash | `harness/types.go`、`store.go` | replay/tamper/conflict tests |
+| Model API/stream/fallback | `harness/model.go` | adapter/router/stream tests |
 | Loop/context/cache | `runtime.go`、`context.go` | provider projection、budget/loop tests |
 | Tool/MCP/policy | `tools.go`、`policy.go` | full-schema/scope/UNKNOWN/MCP tests |
 | Skills/Memory | `skills.go`、`memory.go` | lifecycle/version/forget tests |
-| Planning/DAG | `planning.go`、`internal/dag/` | happy/rework/UAT/crash tests |
+| Planning/DAG | `planning.go`、`harness/dag/` | happy/rework/UAT/crash tests |
 | Multi-Agent | `multi_agent.go` | fan-out/conflict test |
 | Evaluation/feedback | `evaluation.go`、`experiment.go`、`feedback.go` | CI/ablation/promotion/funnel tests |
-| HTTP/SSE | `internal/httpapi/server.go` | end-to-end HTTP test；`Last-Event-ID`、`since`、`follow` |
+| HTTP/SSE | `httpapi/server.go` | end-to-end HTTP test；`Last-Event-ID`、`since`、`follow` |
 
 ## 11. 运行与验证
 

@@ -1,4 +1,5 @@
 .PHONY: test race vet build build-bin demo dag rework server proto clean \
+        guards conformance \
         agent-core orchestrator llm-service self-evolution xai-dashboard infra-up infra-down
 
 GOFLAGS ?=
@@ -11,6 +12,16 @@ race:
 
 vet:
 	go vet ./...
+
+# Enforce the embeddability acceptance criteria (C1-C4). See
+# docs/embeddability-design.md section 9.
+guards:
+	./scripts/embed-guards.sh --self-test
+
+# Run the store conformance suite against every available backend.
+conformance:
+	go test -count=1 -v ./harness/storetest/
+	go test -count=1 -v ./backends/...
 
 # Build every binary in the three-layer stack.
 build:

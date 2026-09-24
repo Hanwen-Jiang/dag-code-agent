@@ -1,8 +1,43 @@
 # 可嵌入性改造设计文档
 
 > 目标：让外部 Go 程序能把本项目的控制面**作为库嵌入自己的进程**，而不是只能通过 HTTP 远程调用。
-> 状态：设计稿（待评审）
+> 状态：**已实施**（P0–P5 全部落地，见下方交付状态）
 > 影响范围：`internal/` → 公开包、`httpapi` 反转、构造 API 重写、模块路径变更
+
+---
+
+## 0. 交付状态
+
+本节记录实际实施结果。实现细节见各阶段章节，验证方式见 §9.3 与 §14。
+
+| 验收标准 | 状态 | 证据 |
+|---|---|---|
+| **C1** 独立 module 可 import 并运行 | ✅ | `examples/embed_external/`（独立 module `example.com/external-consumer`），护栏 G5 |
+| **C2** 自定义 Store / Model / Clock 可注入 | ✅ | `examples/embed_custom_store`、`examples/embed_custom_model` |
+| **C3** 库包零 `os.Getenv` / 零路径探测 / 零信号处理 | ✅ | 护栏 G3、G4；env 解析集中在 `modelenv` 与 `cmd/` |
+| **C4** 核心 CGO-free、无重依赖 | ✅ | 护栏 G1、G2 |
+
+| 阶段 | 状态 | 产出 |
+|---|---|---|
+| P0 模块路径正名 | ✅ | `github.com/Hanwen-Jiang/dag-code-agent`；`make proto` 重生成无版本漂移 |
+| P1 接口抽取 + Option 构造 | ✅ | `harness/store_iface.go`、`journal.go`、`clock.go`、`options.go` |
+| P2 提升为公开包 | ✅ | `harness/`、`harness/dag/`、`httpapi/`、`modelenv/`；`internal/` 已删除 |
+| P3 cmd 瘦身 + env 出库 | ✅ | `cmd/agent-harness` 成为组装根；模型 env 迁入 `modelenv` |
+| P4 证明与护栏 | ✅ | 4 个 example、`harness/storetest` 一致性套件、`scripts/embed-guards.sh`、CI |
+| P5 版本与文档 | ✅ | 本文档、README 嵌入章节、CI workflow |
+
+**实施中的两处设计偏差**（均为强化 P1「不变量属于核心」）：
+
+1. `Replay` / `ReplayState` 未按 §6.2 留在后端接口上，而是**上移到核心 `Journal`**。原因：原实现直接查 `harness_checkpoints`
+   表，若留在接口上等于要求每个后端重新实现校验逻辑。现改为核心通过 `CheckpointAt` 读取，任何后端都可被校验。
+2. `MemoryManager` 原实现直接锁具体结构体的私有 `mu`，这是真实的抽象破坏。改为在 `MemoryStore` 上新增
+   `PutMemoryVersioned` 原子原语（与 `AppendEvent` 同构），版本判定留在核心、原子性下沉到后端。
+
+**尚未交付**（不在 C1–C4 验收范围内）：
+
+- §5.4 的执行入口签名变更（`Run` 返回 `(RunResult, error)`）。这是破坏性变更，需在打 tag 前完成，
+  否则将变成 major 版本变更。
+- §6.3 的 Postgres 后端只做到「编译 + 可用一致性套件验证」，未接 CI 的真实数据库。
 
 ---
 

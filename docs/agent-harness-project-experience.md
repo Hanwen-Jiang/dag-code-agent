@@ -69,14 +69,14 @@ SQLite 让事件链、version conflict、幂等、lease 和恢复在本地可重
 
 | 主题 | 代码 | 可复现入口 |
 |---|---|---|
-| Harness contract/store | `internal/harness/types.go`、`store.go` | event replay/tamper/conflict tests |
+| Harness contract/store | `harness/types.go`、`store.go` | event replay/tamper/conflict tests |
 | Agent loop/context | `runtime.go`、`context.go` | `go run ./cmd/agent-harness -mode demo` |
 | Model API | `model.go` | router/structured/stream tests |
 | Tool/MCP/policy | `tools.go`、`policy.go` | schema/scope/UNKNOWN/MCP tests |
 | Skills/Memory | `skills.go`、`memory.go` | lifecycle/version/forget tests |
-| DAG | `internal/dag/`、`configs/` | `go run ./cmd/agent-dag`、DAG tests |
-| Harness session API | `internal/httpapi/server.go` | `POST /api/harness/runs`、`GET /api/harness/runs/{id}`、SSE events |
-| HTTP/SSE/feedback | `internal/httpapi/server.go` | HTTP end-to-end test |
+| DAG | `harness/dag/`、`configs/` | `go run ./cmd/agent-dag`、DAG tests |
+| Harness session API | `httpapi/server.go` | `POST /api/harness/runs`、`GET /api/harness/runs/{id}`、SSE events |
+| HTTP/SSE/feedback | `httpapi/server.go` | HTTP end-to-end test |
 | Evaluation/evolution | `evaluation.go`、`experiment.go` | CI/ablation/promotion tests |
 
 ## 7. 诚实边界
