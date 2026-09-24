@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	h "github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
+	h "github.com/Hanwen-Jiang/dag-code-agent/harness"
 )
 
 func testManifest(t *testing.T) Manifest {

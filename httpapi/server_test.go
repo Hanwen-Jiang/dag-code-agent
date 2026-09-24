@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/dag"
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/modelenv"
+	"github.com/Hanwen-Jiang/dag-code-agent/harness/dag"
+	"github.com/Hanwen-Jiang/dag-code-agent/harness"
+	"github.com/Hanwen-Jiang/dag-code-agent/modelenv"
 )
 
 func requestJSON(t *testing.T, client *http.Client, method, url string, input any, output any) int {
@@ -49,7 +49,7 @@ func TestHTTPHarnessSessionAndDAGEndToEnd(t *testing.T) {
 	}
 	defer store.Close()
 	settings := modelenv.FromEnv()
-	manifest, manifestErr := dag.LoadManifest("../../configs/software-feature-with-rework-and-uat.json")
+	manifest, manifestErr := dag.LoadManifest("../configs/software-feature-with-rework-and-uat.json")
 	if manifestErr != nil {
 		t.Fatal(manifestErr)
 	}

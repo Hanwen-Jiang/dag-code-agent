@@ -12,10 +12,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/dag"
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/httpapi"
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/modelenv"
+	"github.com/Hanwen-Jiang/dag-code-agent/harness/dag"
+	"github.com/Hanwen-Jiang/dag-code-agent/harness"
+	"github.com/Hanwen-Jiang/dag-code-agent/httpapi"
+	"github.com/Hanwen-Jiang/dag-code-agent/modelenv"
 )
 
 // main is a composition root, not a library: reading the environment, probing

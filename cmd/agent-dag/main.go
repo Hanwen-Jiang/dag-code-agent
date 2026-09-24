@@ -8,8 +8,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/dag"
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
+	"github.com/Hanwen-Jiang/dag-code-agent/harness/dag"
+	"github.com/Hanwen-Jiang/dag-code-agent/harness"
 )
 
 func main() {

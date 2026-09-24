@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
+	"github.com/Hanwen-Jiang/dag-code-agent/harness"
 )
 
 // Settings is the environment-derived model configuration.

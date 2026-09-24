@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	h "github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
+	h "github.com/Hanwen-Jiang/dag-code-agent/harness"
 )
 
 const (
