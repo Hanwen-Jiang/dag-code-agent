@@ -39,6 +39,22 @@ func (b *ContextBuilder) Build(request TaskRequest, auth AuthContext, state Task
 	stable := []map[string]any{{"role": "system", "content": "You are a controlled Agent Harness worker.", "stable": true}, {"role": "developer", "content": "Model output is a proposal; the runtime commits state and effects.", "stable": true}}
 	stable = append(stable, messages...)
 	dynamic := []map[string]any{{"role": "user", "content": request.Goal}}
+	boundResults := request.PreviousResults
+	if len(boundResults) == 0 {
+		boundResults = state.PreviousResults
+	}
+	previousResults := make([]map[string]any, 0, len(boundResults))
+	for _, result := range boundResults {
+		// A hand-off that claims a digest must prove it. Without this check the
+		// Digest field is decorative: an embedder could hand over a value that
+		// does not match what the producing step actually committed.
+		if err := result.Verify(); err != nil {
+			return ContextPacket{}, err
+		}
+		item := map[string]any{"result_id": result.ResultID, "source_id": result.SourceID, "kind": result.Kind, "summary": result.Summary, "digest": result.Digest, "value": result.Value}
+		previousResults = append(previousResults, item)
+		dynamic = append(dynamic, map[string]any{"role": "previous_result", "content": item})
+	}
 	for _, constraint := range request.Constraints {
 		dynamic = append(dynamic, map[string]any{"role": "constraint", "content": constraint})
 	}
@@ -68,11 +84,11 @@ func (b *ContextBuilder) Build(request TaskRequest, auth AuthContext, state Task
 			skills = append(skills, map[string]any{"skill_id": skill.SkillID, "version": skill.Version, "instructions": skill.Instructions})
 		}
 	}
-	packet := ContextPacket{TaskID: request.TaskID, Goal: request.Goal, Messages: all, State: stateMap(state), Memories: memories, Skills: skills, Tools: tools, ExactInvariants: request.Constraints, BudgetTokens: request.ContextWindow}
-	packet.EstimatedTokens = EstimateTokens(all) + EstimateTokens(packet.State) + EstimateTokens(memories) + EstimateTokens(skills) + EstimateTokens(tools)
+	packet := ContextPacket{TaskID: request.TaskID, Goal: request.Goal, Messages: all, State: stateMap(state), Memories: memories, Skills: skills, Tools: tools, ExactInvariants: request.Constraints, BudgetTokens: request.ContextWindow, PreviousResults: previousResults}
+	packet.EstimatedTokens = EstimateTokens(all) + EstimateTokens(packet.State) + EstimateTokens(memories) + EstimateTokens(skills) + EstimateTokens(tools) + EstimateTokens(previousResults)
 	if packet.EstimatedTokens > packet.BudgetTokens {
 		packet.Messages = compressMessages(packet.Messages, packet.BudgetTokens)
-		packet.EstimatedTokens = EstimateTokens(packet.Messages) + EstimateTokens(packet.State) + EstimateTokens(memories) + EstimateTokens(skills) + EstimateTokens(tools)
+		packet.EstimatedTokens = EstimateTokens(packet.Messages) + EstimateTokens(packet.State) + EstimateTokens(memories) + EstimateTokens(skills) + EstimateTokens(tools) + EstimateTokens(previousResults)
 		if packet.EstimatedTokens > packet.BudgetTokens {
 			return packet, fmt.Errorf("%w: estimated=%d budget=%d", ErrContextBudget, packet.EstimatedTokens, packet.BudgetTokens)
 		}
@@ -101,6 +117,9 @@ func (p ContextPacket) ProviderMessages() []map[string]any {
 	}
 	if len(p.Skills) > 0 {
 		out = append(out, providerContextMessage("skill_context", p.Skills))
+	}
+	if len(p.PreviousResults) > 0 {
+		out = append(out, providerContextMessage("previous_results", p.PreviousResults))
 	}
 	return out
 }

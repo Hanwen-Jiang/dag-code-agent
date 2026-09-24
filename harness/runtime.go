@@ -54,6 +54,8 @@ type Runtime struct {
 	budget         *BudgetLedger
 	clock          Clock
 	logger         *slog.Logger
+	workspaceStore WorkspaceStore
+	mailbox        *Mailbox
 	ownsStore      bool
 
 	mu       sync.Mutex
@@ -80,6 +82,16 @@ func (r *Runtime) Memory() *MemoryManager { return r.memory }
 
 // Clock returns the time source used by this runtime.
 func (r *Runtime) Clock() Clock { return r.clock }
+
+// WorkspaceStore exposes the optional shared-state projection.
+func (r *Runtime) WorkspaceStore() WorkspaceStore { return r.workspaceStore }
+
+// Mailbox exposes the optional protocol-aware collaboration channel.
+//
+// It returns nil when the configured store does not implement MailboxStore
+// (for example a minimal third-party CoreStore), so callers must check for nil
+// rather than relying on every call failing.
+func (r *Runtime) Mailbox() *Mailbox { return r.mailbox }
 
 // SetModel replaces the model adapter. Unlike the exported field this
 // replaces, the swap is guarded so it cannot interleave with a running turn.

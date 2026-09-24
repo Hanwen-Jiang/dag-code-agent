@@ -47,9 +47,14 @@ import (
 	"github.com/Hanwen-Jiang/dag-code-agent/harness"
 )
 
-// Compile-time assertion: the backend satisfies the full composed surface,
-// not just CoreStore.
-var _ harness.Store = (*Store)(nil)
+// Compile-time assertions: the backend satisfies the full composed surface,
+// not just CoreStore, and it implements the optional collaboration interfaces
+// (workspaces/topics + mailbox) rather than merely omitting them.
+var (
+	_ harness.Store          = (*Store)(nil)
+	_ harness.WorkspaceStore = (*Store)(nil)
+	_ harness.MailboxStore   = (*Store)(nil)
+)
 
 // Store is a PostgreSQL-backed harness.Store. It is safe for concurrent use:
 // pgxpool hands each statement its own connection and the atomic operations
@@ -764,6 +769,314 @@ func (s *Store) Feedback(tenantID string) ([]harness.FeedbackSignal, error) {
 	return out, rows.Err()
 }
 
+// --- WorkspaceStore / MailboxStore -----------------------------------------
+
+// requireWorkspace enforces workspace existence inside a transaction, scoped to
+// the caller's tenant/subject. It exists so every workspace-scoped write in
+// this backend reports the shared harness.ErrWorkspaceNotFound sentinel instead
+// of a raw foreign-key violation, exactly like requireWorkspace in
+// harness/store.go. The workspace id comes from the call, never from a message
+// body, and the identity always comes from the AuthContext.
+func requireWorkspace(ctx context.Context, tx pgx.Tx, auth harness.AuthContext, workspaceID string) error {
+	var exists int
+	err := tx.QueryRow(ctx,
+		`SELECT 1 FROM harness_workspaces WHERE tenant_id=$1 AND subject_id=$2 AND workspace_id=$3`,
+		auth.TenantID, auth.SubjectID, workspaceID).Scan(&exists)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return harness.ErrWorkspaceNotFound
+	}
+	return err
+}
+
+// EnsureWorkspace creates or returns a tenant-scoped workspace.
+//
+// ON CONFLICT DO NOTHING makes re-ensuring idempotent without a race: the
+// insert and the read-back share one transaction, so a retried agent start can
+// never overwrite the metadata (or the timestamps) of an existing workspace.
+func (s *Store) EnsureWorkspace(auth harness.AuthContext, workspaceID string, metadata map[string]any) (harness.Workspace, error) {
+	if workspaceID == "" {
+		return harness.Workspace{}, errors.New("WORKSPACE_ID_REQUIRED")
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadataJSON, err := canonical(metadata)
+	if err != nil {
+		return harness.Workspace{}, err
+	}
+	now := s.now()
+	var raw string
+	workspace := harness.Workspace{WorkspaceID: workspaceID, TenantID: auth.TenantID, SubjectID: auth.SubjectID}
+	ctx := context.Background()
+	err = s.withTx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO harness_workspaces(tenant_id,subject_id,workspace_id,metadata_json,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,subject_id,workspace_id) DO NOTHING`,
+			auth.TenantID, auth.SubjectID, workspaceID, string(metadataJSON), now, now); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
+			`SELECT metadata_json,created_at,updated_at FROM harness_workspaces WHERE tenant_id=$1 AND subject_id=$2 AND workspace_id=$3`,
+			auth.TenantID, auth.SubjectID, workspaceID).Scan(&raw, &workspace.CreatedAt, &workspace.UpdatedAt)
+	})
+	if err != nil {
+		return harness.Workspace{}, err
+	}
+	_ = json.Unmarshal([]byte(raw), &workspace.Metadata)
+	return workspace, nil
+}
+
+// PutTopicValue writes one topic key with compare-and-swap on expectedVersion.
+// ok is false (with a nil error) when the stored version does not match, which
+// lets the core re-read and retry instead of treating it as a failure.
+//
+// A transaction-scoped advisory lock serializes writers on one
+// (tenant, subject, workspace, topic, key) chain: under READ COMMITTED a plain
+// MAX(version) read would not see a concurrent uncommitted write, so two
+// writers holding the same expectedVersion could both publish it. This is the
+// same defence PutMemoryVersioned uses for its version chain.
+func (s *Store) PutTopicValue(auth harness.AuthContext, workspaceID, topic, key string, value map[string]any, expectedVersion int) (harness.TopicValue, bool, error) {
+	if workspaceID == "" || topic == "" || key == "" {
+		return harness.TopicValue{}, false, errors.New("TOPIC_SCOPE_REQUIRED")
+	}
+	if value == nil {
+		value = map[string]any{}
+	}
+	valueJSON, err := canonical(value)
+	if err != nil {
+		return harness.TopicValue{}, false, err
+	}
+	digest, err := harness.Digest(value)
+	if err != nil {
+		return harness.TopicValue{}, false, err
+	}
+	now := s.now()
+	var result harness.TopicValue
+	ok := false
+	ctx := context.Background()
+	err = s.withTx(ctx, func(tx pgx.Tx) error {
+		// Check the workspace explicitly rather than relying on the foreign key
+		// so that every backend reports the same WORKSPACE_NOT_FOUND error.
+		if err := requireWorkspace(ctx, tx, auth, workspaceID); err != nil {
+			return err
+		}
+		lockKey := auth.TenantID + "\x1f" + auth.SubjectID + "\x1f" + workspaceID + "\x1f" + topic + "\x1f" + key
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+			return err
+		}
+		var current int
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(MAX(version),0) FROM harness_topics WHERE tenant_id=$1 AND subject_id=$2 AND workspace_id=$3 AND topic=$4 AND topic_key=$5`,
+			auth.TenantID, auth.SubjectID, workspaceID, topic, key).Scan(&current); err != nil {
+			return err
+		}
+		if current != expectedVersion {
+			return nil
+		}
+		version := current + 1
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO harness_topics(tenant_id,subject_id,workspace_id,topic,topic_key,value_json,digest,version,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (tenant_id,subject_id,workspace_id,topic,topic_key) DO UPDATE SET value_json=excluded.value_json,digest=excluded.digest,version=excluded.version,updated_at=excluded.updated_at`,
+			auth.TenantID, auth.SubjectID, workspaceID, topic, key, string(valueJSON), digest, version, now); err != nil {
+			return err
+		}
+		result = harness.TopicValue{WorkspaceID: workspaceID, Topic: topic, Key: key, Value: value, Digest: digest, Version: version, UpdatedAt: now}
+		ok = true
+		return nil
+	})
+	return result, ok, err
+}
+
+// TopicValues returns the key/value projection of one topic, ordered by key.
+// A topic that does not exist (or belongs to another tenant/subject) yields an
+// empty slice, matching the SQLite and in-memory backends.
+func (s *Store) TopicValues(auth harness.AuthContext, workspaceID, topic string) ([]harness.TopicValue, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT topic,topic_key,value_json,digest,version,updated_at FROM harness_topics WHERE tenant_id=$1 AND subject_id=$2 AND workspace_id=$3 AND topic=$4 ORDER BY topic_key`,
+		auth.TenantID, auth.SubjectID, workspaceID, topic)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := []harness.TopicValue{}
+	for rows.Next() {
+		var item harness.TopicValue
+		var raw string
+		if err := rows.Scan(&item.Topic, &item.Key, &raw, &item.Digest, &item.Version, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &item.Value); err != nil {
+			return nil, err
+		}
+		item.WorkspaceID = workspaceID
+		values = append(values, item)
+	}
+	return values, rows.Err()
+}
+
+// AppendMailbox durably appends one envelope and assigns its per-topic
+// sequence.
+//
+// The idempotency key identifies one message inside one topic's sequence space,
+// so the deduplication lookup is keyed by
+// (tenant, subject, workspace, topic, from_agent, idempotency_key) and a
+// replayed send returns the originally stored message instead of appending a
+// second one. The advisory lock covers exactly that sequence space, so
+// concurrent appends cannot both observe the same MAX(sequence) and collide on
+// the mailbox primary key.
+func (s *Store) AppendMailbox(auth harness.AuthContext, message harness.MailboxMessage) (harness.MailboxMessage, error) {
+	if message.WorkspaceID == "" || message.Topic == "" || message.FromAgent == "" {
+		return harness.MailboxMessage{}, errors.New("MAILBOX_SCOPE_REQUIRED")
+	}
+	if message.MessageID == "" {
+		message.MessageID = harness.NewID("MSG")
+	}
+	if message.Payload == nil {
+		message.Payload = map[string]any{}
+	}
+	payload, err := canonical(message.Payload)
+	if err != nil {
+		return harness.MailboxMessage{}, err
+	}
+	now := s.now()
+	ctx := context.Background()
+	err = s.withTx(ctx, func(tx pgx.Tx) error {
+		if err := requireWorkspace(ctx, tx, auth, message.WorkspaceID); err != nil {
+			return err
+		}
+		lockKey := auth.TenantID + "\x1f" + auth.SubjectID + "\x1f" + message.WorkspaceID + "\x1f" + message.Topic
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+			return err
+		}
+		if message.IdempotencyKey != "" {
+			var existing harness.MailboxMessage
+			var raw string
+			var acked int
+			// Topic is part of the idempotency scope: the same key in another
+			// topic is a different message.
+			err := tx.QueryRow(ctx,
+				`SELECT message_id,sequence,from_agent,to_agent,protocol,message_type,correlation_id,payload_json,created_at,acked FROM harness_mailbox WHERE tenant_id=$1 AND subject_id=$2 AND workspace_id=$3 AND topic=$4 AND from_agent=$5 AND idempotency_key=$6`,
+				auth.TenantID, auth.SubjectID, message.WorkspaceID, message.Topic, message.FromAgent, message.IdempotencyKey).
+				Scan(&existing.MessageID, &existing.Sequence, &existing.FromAgent, &existing.ToAgent, &existing.Protocol, &existing.MessageType, &existing.CorrelationID, &raw, &existing.CreatedAt, &acked)
+			if err == nil {
+				_ = json.Unmarshal([]byte(raw), &existing.Payload)
+				existing.Acked = acked != 0
+				existing.WorkspaceID = message.WorkspaceID
+				existing.Topic = message.Topic
+				existing.IdempotencyKey = message.IdempotencyKey
+				existing.TenantID, existing.SubjectID = auth.TenantID, auth.SubjectID
+				message = existing
+				return nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
+		var sequence int64
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(MAX(sequence),0)+1 FROM harness_mailbox WHERE tenant_id=$1 AND subject_id=$2 AND workspace_id=$3 AND topic=$4`,
+			auth.TenantID, auth.SubjectID, message.WorkspaceID, message.Topic).Scan(&sequence); err != nil {
+			return err
+		}
+		message.Sequence, message.CreatedAt = sequence, now
+		message.TenantID, message.SubjectID = auth.TenantID, auth.SubjectID
+		message.Acked = false
+		_, err := tx.Exec(ctx,
+			`INSERT INTO harness_mailbox(tenant_id,subject_id,workspace_id,topic,sequence,message_id,from_agent,to_agent,protocol,message_type,correlation_id,idempotency_key,payload_json,created_at,acked) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,0)`,
+			auth.TenantID, auth.SubjectID, message.WorkspaceID, message.Topic, message.Sequence, message.MessageID, message.FromAgent, message.ToAgent, message.Protocol, message.MessageType, message.CorrelationID, message.IdempotencyKey, string(payload), message.CreatedAt)
+		return err
+	})
+	if err != nil {
+		return harness.MailboxMessage{}, err
+	}
+	return message, nil
+}
+
+// MailboxMessages returns unacked messages for one recipient, oldest first.
+//
+// Direct messages use the row's acked flag and are only visible to the
+// addressed recipient. Broadcast messages (an empty to_agent) are acknowledged
+// per recipient through harness_mailbox_acks, so one agent reading a broadcast
+// cannot hide it from the other agents on the topic.
+func (s *Store) MailboxMessages(auth harness.AuthContext, workspaceID, topic, recipient string, limit int) ([]harness.MailboxMessage, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT sequence,message_id,from_agent,to_agent,protocol,message_type,correlation_id,idempotency_key,payload_json,created_at,acked FROM harness_mailbox WHERE tenant_id=$1 AND subject_id=$2 AND workspace_id=$3 AND topic=$4 AND (
+  (to_agent=$5 AND acked=0)
+  OR (to_agent='' AND NOT EXISTS (SELECT 1 FROM harness_mailbox_acks a WHERE a.tenant_id=harness_mailbox.tenant_id AND a.subject_id=harness_mailbox.subject_id AND a.message_id=harness_mailbox.message_id AND a.recipient=$6))
+ ) ORDER BY sequence LIMIT $7`,
+		auth.TenantID, auth.SubjectID, workspaceID, topic, recipient, recipient, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := []harness.MailboxMessage{}
+	for rows.Next() {
+		var message harness.MailboxMessage
+		var raw string
+		var acked int
+		if err := rows.Scan(&message.Sequence, &message.MessageID, &message.FromAgent, &message.ToAgent, &message.Protocol, &message.MessageType, &message.CorrelationID, &message.IdempotencyKey, &raw, &message.CreatedAt, &acked); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &message.Payload); err != nil {
+			return nil, err
+		}
+		message.Acked = acked != 0
+		message.TenantID, message.SubjectID = auth.TenantID, auth.SubjectID
+		message.WorkspaceID, message.Topic = workspaceID, topic
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
+// AckMailbox acknowledges one message for one recipient. It is idempotent.
+//
+// A direct message is acknowledged on its own row and only by the addressed
+// recipient; anybody else gets (false, nil). A broadcast message is
+// acknowledged per recipient, so every other agent still receives it.
+func (s *Store) AckMailbox(auth harness.AuthContext, messageID, recipient string) (bool, error) {
+	if recipient == "" {
+		return false, errors.New("MAILBOX_RECIPIENT_REQUIRED")
+	}
+	acknowledged := false
+	ctx := context.Background()
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		var toAgent string
+		err := tx.QueryRow(ctx,
+			`SELECT to_agent FROM harness_mailbox WHERE tenant_id=$1 AND subject_id=$2 AND message_id=$3`,
+			auth.TenantID, auth.SubjectID, messageID).Scan(&toAgent)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if toAgent != "" {
+			if toAgent != recipient {
+				// Only the addressed recipient may ack a direct message.
+				return nil
+			}
+			tag, err := tx.Exec(ctx,
+				`UPDATE harness_mailbox SET acked=1 WHERE tenant_id=$1 AND subject_id=$2 AND message_id=$3 AND to_agent=$4`,
+				auth.TenantID, auth.SubjectID, messageID, recipient)
+			if err != nil {
+				return err
+			}
+			acknowledged = tag.RowsAffected() == 1
+			return nil
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO harness_mailbox_acks(tenant_id,subject_id,message_id,recipient,acked_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT (tenant_id,subject_id,message_id,recipient) DO NOTHING`,
+			auth.TenantID, auth.SubjectID, messageID, recipient, s.now()); err != nil {
+			return err
+		}
+		// Idempotent: a repeat ack still reports success.
+		acknowledged = true
+		return nil
+	})
+	return acknowledged, err
+}
+
 // --- Migrate ---------------------------------------------------------------
 
 // migrateDDL is the full schema, mirroring harness/store.go's SQLite init()
@@ -810,6 +1123,44 @@ var migrateDDL = []string{
  tenant_id TEXT NOT NULL, subject_id TEXT NOT NULL, artifact_id TEXT NOT NULL,
  content_json TEXT NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL,
  PRIMARY KEY(tenant_id, subject_id, artifact_id)
+)`,
+	// Collaboration tables. They mirror harness/store.go's SQLite schema with
+	// Postgres types (SQLite's 64-bit INTEGER becomes BIGINT) and the same
+	// indexes, so a workspace-scoped write cannot exist without its workspace
+	// and the mailbox keeps the same visibility rules on both backends.
+	`CREATE TABLE IF NOT EXISTS harness_workspaces (
+ tenant_id TEXT NOT NULL, subject_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+ metadata_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(tenant_id, subject_id, workspace_id)
+)`,
+	`CREATE TABLE IF NOT EXISTS harness_topics (
+ tenant_id TEXT NOT NULL, subject_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+ topic TEXT NOT NULL, topic_key TEXT NOT NULL, value_json TEXT NOT NULL,
+ digest TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(tenant_id, subject_id, workspace_id, topic, topic_key),
+ FOREIGN KEY(tenant_id, subject_id, workspace_id) REFERENCES harness_workspaces(tenant_id, subject_id, workspace_id)
+)`,
+	`CREATE TABLE IF NOT EXISTS harness_mailbox (
+ tenant_id TEXT NOT NULL, subject_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+ topic TEXT NOT NULL, sequence BIGINT NOT NULL, message_id TEXT NOT NULL,
+ from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, protocol TEXT NOT NULL,
+ message_type TEXT NOT NULL, correlation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+ payload_json TEXT NOT NULL, created_at TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(tenant_id, subject_id, workspace_id, topic, sequence),
+ UNIQUE(tenant_id, subject_id, message_id)
+)`,
+	`CREATE INDEX IF NOT EXISTS idx_harness_mailbox_receive ON harness_mailbox(tenant_id, subject_id, workspace_id, topic, to_agent, acked, sequence)`,
+	// Idempotency is scoped to one topic's sequence space, so topic is part of
+	// the unique key. (This backend never shipped an index without topic, so
+	// unlike the SQLite migration there is nothing to drop on upgrade.)
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_harness_mailbox_idempotency_topic ON harness_mailbox(tenant_id, subject_id, workspace_id, topic, from_agent, idempotency_key) WHERE idempotency_key <> ''`,
+	// Broadcast messages (to_agent = '') need per-recipient acknowledgement: a
+	// single acked flag would let the first reader hide the message from every
+	// other agent on the topic.
+	`CREATE TABLE IF NOT EXISTS harness_mailbox_acks (
+ tenant_id TEXT NOT NULL, subject_id TEXT NOT NULL, message_id TEXT NOT NULL,
+ recipient TEXT NOT NULL, acked_at TEXT NOT NULL,
+ PRIMARY KEY(tenant_id, subject_id, message_id, recipient)
 )`,
 }
 

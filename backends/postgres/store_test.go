@@ -227,6 +227,100 @@ func TestConcurrentPutMemoryVersioned(t *testing.T) {
 	}
 }
 
+// TestConcurrentMailboxAppendKeepsTopicSequence guards the per-topic sequence
+// assignment the collaboration contract promises: racing sends must land on
+// distinct positions in one topic's sequence space, and a key replayed
+// concurrently must still deduplicate to the original message. Both rely on the
+// transaction-scoped advisory lock over (tenant, subject, workspace, topic);
+// without it two writers could read the same MAX(sequence) and collide on the
+// mailbox primary key. It skips without a DSN.
+func TestConcurrentMailboxAppendKeepsTopicSequence(t *testing.T) {
+	dsn := os.Getenv(dsnEnv)
+	if dsn == "" {
+		t.Skip("HARNESS_TEST_POSTGRES_DSN not set")
+	}
+	store := newIsolatedStore(t, dsn)
+	auth := harness.AuthContext{TenantID: "tenant", SubjectID: "subject"}
+	if _, err := store.EnsureWorkspace(auth, "ws-race", nil); err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+
+	// Even writers race on one shared idempotency key; odd writers each use a
+	// fresh key. So the topic must end up with 1 + writers/2 messages.
+	const writers = 8
+	var wg sync.WaitGroup
+	messages := make([]harness.MailboxMessage, writers)
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := "idem-shared"
+			if i%2 == 1 {
+				key = harness.NewID("idem")
+			}
+			messages[i], errs[i] = store.AppendMailbox(auth, harness.MailboxMessage{
+				WorkspaceID: "ws-race", Topic: "work", FromAgent: "a", ToAgent: "b",
+				Protocol: "json/v1", MessageType: "result", IdempotencyKey: key,
+				Payload: map[string]any{"writer": i},
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	// Deduplicated replays legitimately return the same (id, sequence), so the
+	// invariant is per distinct message: no two messages may share a position.
+	sequenceOf := map[string]int64{}
+	sequenceOwner := map[int64]string{}
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d: %v", i, err)
+		}
+		id := messages[i].MessageID
+		if previous, ok := sequenceOf[id]; ok && previous != messages[i].Sequence {
+			t.Fatalf("message %s reported sequences %d and %d", id, previous, messages[i].Sequence)
+		}
+		sequenceOf[id] = messages[i].Sequence
+	}
+	for id, sequence := range sequenceOf {
+		if owner, ok := sequenceOwner[sequence]; ok {
+			t.Fatalf("sequence %d assigned to both %s and %s", sequence, owner, id)
+		}
+		sequenceOwner[sequence] = id
+	}
+	// The four shared-key writers must all observe the same stored message.
+	if messages[0].MessageID != messages[2].MessageID || messages[0].MessageID != messages[6].MessageID {
+		t.Fatalf("shared idempotency key was not deduplicated: %q vs %q vs %q", messages[0].MessageID, messages[2].MessageID, messages[6].MessageID)
+	}
+	if len(sequenceOf) != 1+writers/2 {
+		t.Fatalf("distinct messages=%d, want %d", len(sequenceOf), 1+writers/2)
+	}
+	for position := int64(1); position <= 1+writers/2; position++ {
+		if _, ok := sequenceOwner[position]; !ok {
+			t.Fatalf("sequence space has no message at %d: %v", position, sequenceOwner)
+		}
+	}
+
+	// Receive sees exactly the distinct messages, in sequence order.
+	received, err := store.MailboxMessages(auth, "ws-race", "work", "b", 100)
+	if err != nil {
+		t.Fatalf("MailboxMessages: %v", err)
+	}
+	if len(received) != 1+writers/2 {
+		t.Fatalf("received %d messages, want %d", len(received), 1+writers/2)
+	}
+	for i := 1; i < len(received); i++ {
+		if received[i-1].Sequence >= received[i].Sequence {
+			t.Fatalf("receive not ordered: %d then %d", received[i-1].Sequence, received[i].Sequence)
+		}
+	}
+
+	// An empty recipient is a caller error, never a silent no-op ack.
+	if acked, err := store.AckMailbox(auth, received[0].MessageID, ""); err == nil || acked {
+		t.Fatalf("AckMailbox(empty recipient) ok=%v err=%v, want error", acked, err)
+	}
+}
+
 // newIsolatedStore returns a store whose tables live in a freshly created
 // schema, so every conformance subtest starts from an empty database and
 // repeated runs never collide on task ids. The schema is dropped and the pool

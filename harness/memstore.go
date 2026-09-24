@@ -2,8 +2,8 @@ package harness
 
 import (
 	"encoding/json"
-	"fmt"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -32,6 +32,12 @@ type InMemoryStore struct {
 	leases      map[string]memLease
 	artifacts   map[string]memArtifact
 	feedback    []FeedbackSignal
+	workspaces  map[string]Workspace
+	topics      map[string]TopicValue
+	mailbox     []MailboxMessage
+	// mailboxAcks tracks broadcast acknowledgements per recipient, mirroring
+	// harness_mailbox_acks in the SQLite backend.
+	mailboxAcks map[string]map[string]bool
 	closed      bool
 }
 
@@ -70,6 +76,10 @@ func NewInMemoryStore() *InMemoryStore {
 		idempotency: map[string]memIdem{},
 		leases:      map[string]memLease{},
 		artifacts:   map[string]memArtifact{},
+		workspaces:  map[string]Workspace{},
+		topics:      map[string]TopicValue{},
+		mailbox:     []MailboxMessage{},
+		mailboxAcks: map[string]map[string]bool{},
 	}
 }
 
@@ -519,6 +529,182 @@ func (s *InMemoryStore) GetArtifact(auth AuthContext, artifactID string) (Artifa
 		return ArtifactRecord{}, false, nil
 	}
 	return ArtifactRecord{ArtifactID: artifactID, TenantID: auth.TenantID, SubjectID: auth.SubjectID, Content: existing.content, SHA256: existing.sha256, CreatedAt: existing.createdAt}, true, nil
+}
+
+func workspaceKey(auth AuthContext, workspaceID string) string {
+	return auth.TenantID + "\x00" + auth.SubjectID + "\x00" + workspaceID
+}
+
+func topicKey(auth AuthContext, workspaceID, topic, key string) string {
+	return workspaceKey(auth, workspaceID) + "\x00" + topic + "\x00" + key
+}
+
+func (s *InMemoryStore) EnsureWorkspace(auth AuthContext, workspaceID string, metadata map[string]any) (Workspace, error) {
+	if workspaceID == "" {
+		return Workspace{}, errors.New("WORKSPACE_ID_REQUIRED")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return Workspace{}, err
+	}
+	key := workspaceKey(auth, workspaceID)
+	if existing, ok := s.workspaces[key]; ok {
+		return existing, nil
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	now := s.now()
+	workspace := Workspace{WorkspaceID: workspaceID, TenantID: auth.TenantID, SubjectID: auth.SubjectID, Metadata: metadata, CreatedAt: now, UpdatedAt: now}
+	s.workspaces[key] = workspace
+	return workspace, nil
+}
+
+func (s *InMemoryStore) PutTopicValue(auth AuthContext, workspaceID, topic, key string, value map[string]any, expectedVersion int) (TopicValue, bool, error) {
+	if workspaceID == "" || topic == "" || key == "" {
+		return TopicValue{}, false, errors.New("TOPIC_SCOPE_REQUIRED")
+	}
+	if value == nil {
+		value = map[string]any{}
+	}
+	digest, err := Digest(value)
+	if err != nil {
+		return TopicValue{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return TopicValue{}, false, err
+	}
+	if _, ok := s.workspaces[workspaceKey(auth, workspaceID)]; !ok {
+		return TopicValue{}, false, ErrWorkspaceNotFound
+	}
+	lookup := topicKey(auth, workspaceID, topic, key)
+	current := s.topics[lookup]
+	if current.Version != expectedVersion {
+		return TopicValue{}, false, nil
+	}
+	item := TopicValue{WorkspaceID: workspaceID, Topic: topic, Key: key, Value: value, Digest: digest, Version: expectedVersion + 1, UpdatedAt: s.now()}
+	s.topics[lookup] = item
+	return item, true, nil
+}
+
+func (s *InMemoryStore) TopicValues(auth AuthContext, workspaceID, topic string) ([]TopicValue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+	values := []TopicValue{}
+	prefix := workspaceKey(auth, workspaceID) + "\x00" + topic + "\x00"
+	for key, value := range s.topics {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			values = append(values, value)
+		}
+	}
+	normalizeTopicValues(values)
+	return values, nil
+}
+
+func (s *InMemoryStore) AppendMailbox(auth AuthContext, message MailboxMessage) (MailboxMessage, error) {
+	if message.WorkspaceID == "" || message.Topic == "" || message.FromAgent == "" {
+		return MailboxMessage{}, errors.New("MAILBOX_SCOPE_REQUIRED")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return MailboxMessage{}, err
+	}
+	if _, ok := s.workspaces[workspaceKey(auth, message.WorkspaceID)]; !ok {
+		return MailboxMessage{}, ErrWorkspaceNotFound
+	}
+	if message.MessageID == "" {
+		message.MessageID = NewID("MSG")
+	}
+	if message.Payload == nil {
+		message.Payload = map[string]any{}
+	}
+	if message.IdempotencyKey != "" {
+		for _, existing := range s.mailbox {
+			if existing.TenantID == auth.TenantID && existing.SubjectID == auth.SubjectID && existing.WorkspaceID == message.WorkspaceID && existing.Topic == message.Topic && existing.FromAgent == message.FromAgent && existing.IdempotencyKey == message.IdempotencyKey {
+				return existing, nil
+			}
+		}
+	}
+	var sequence int64 = 1
+	for _, existing := range s.mailbox {
+		if existing.TenantID == auth.TenantID && existing.SubjectID == auth.SubjectID && existing.WorkspaceID == message.WorkspaceID && existing.Topic == message.Topic && existing.Sequence >= sequence {
+			sequence = existing.Sequence + 1
+		}
+	}
+	message.Sequence, message.CreatedAt = sequence, s.now()
+	message.TenantID, message.SubjectID = auth.TenantID, auth.SubjectID
+	s.mailbox = append(s.mailbox, message)
+	return message, nil
+}
+
+// MailboxMessages returns unacked messages for one recipient, mirroring the
+// SQLite backend: direct messages use the row's acked flag, broadcasts are
+// acknowledged per recipient.
+func (s *InMemoryStore) MailboxMessages(auth AuthContext, workspaceID, topic, recipient string, limit int) ([]MailboxMessage, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
+	messages := []MailboxMessage{}
+	for _, message := range s.mailbox {
+		if message.TenantID != auth.TenantID || message.SubjectID != auth.SubjectID || message.WorkspaceID != workspaceID || message.Topic != topic {
+			continue
+		}
+		if message.ToAgent == "" {
+			if s.mailboxAcks[message.MessageID][recipient] {
+				continue
+			}
+		} else if message.Acked || message.ToAgent != recipient {
+			continue
+		}
+		messages = append(messages, message)
+		if len(messages) == limit {
+			break
+		}
+	}
+	return messages, nil
+}
+
+func (s *InMemoryStore) AckMailbox(auth AuthContext, messageID, recipient string) (bool, error) {
+	if recipient == "" {
+		return false, errors.New("MAILBOX_RECIPIENT_REQUIRED")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkOpen(); err != nil {
+		return false, err
+	}
+	for i := range s.mailbox {
+		if s.mailbox[i].TenantID != auth.TenantID || s.mailbox[i].SubjectID != auth.SubjectID || s.mailbox[i].MessageID != messageID {
+			continue
+		}
+		if s.mailbox[i].ToAgent != "" {
+			if s.mailbox[i].ToAgent != recipient {
+				// Only the addressed recipient may ack a direct message.
+				return false, nil
+			}
+			s.mailbox[i].Acked = true
+			return true, nil
+		}
+		// Broadcast: acknowledge for this recipient only, idempotently.
+		if s.mailboxAcks[messageID] == nil {
+			s.mailboxAcks[messageID] = map[string]bool{}
+		}
+		s.mailboxAcks[messageID][recipient] = true
+		return true, nil
+	}
+	return false, nil
 }
 
 // --- FeedbackStore ---------------------------------------------------------

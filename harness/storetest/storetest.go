@@ -43,6 +43,21 @@ func RunAll(t *testing.T, newStore func(t *testing.T) harness.Store) {
 	t.Helper()
 	RunCore(t, newStore)
 	RunFull(t, newStore, Options{})
+	RunCollaboration(t, newStore)
+}
+
+// RunCollaboration runs the Workspace/Topic/Mailbox contract.
+//
+// A backend that does not implement the optional collaboration interfaces is
+// skipped. Every backend that does implement them must agree on all of it: the
+// checks below deliberately cover the cases where the SQLite and in-memory
+// implementations diverged (idempotency scope, missing workspace, broadcast
+// acknowledgement).
+func RunCollaboration(t *testing.T, newStore func(t *testing.T) harness.Store) {
+	t.Helper()
+	t.Run("Collaboration/WorkspaceAndTopics", func(t *testing.T) { testWorkspaceAndTopics(t, newStore(t)) })
+	t.Run("Collaboration/MailboxDelivery", func(t *testing.T) { testMailboxDelivery(t, newStore(t)) })
+	t.Run("Collaboration/BroadcastAckIsPerRecipient", func(t *testing.T) { testBroadcastAck(t, newStore(t)) })
 }
 
 // RunCore runs only the TaskStore/EventStore contract, which is what a
@@ -409,5 +424,182 @@ func testFeedback(t *testing.T, store harness.Store) {
 	}
 	if other, err := feedback.Feedback("other-tenant"); err != nil || len(other) != 0 {
 		t.Fatalf("Feedback(other) len=%d err=%v", len(other), err)
+	}
+}
+
+// --- Collaboration ---------------------------------------------------------
+
+// collaborationBackend is the optional surface these checks exercise.
+type collaborationBackend interface {
+	harness.WorkspaceStore
+	harness.MailboxStore
+}
+
+func asCollaboration(t *testing.T, store harness.Store) collaborationBackend {
+	t.Helper()
+	backend, ok := store.(collaborationBackend)
+	if !ok {
+		t.Skip("backend does not implement WorkspaceStore/MailboxStore")
+	}
+	return backend
+}
+
+func testWorkspaceAndTopics(t *testing.T, store harness.Store) {
+	backend := asCollaboration(t, store)
+	auth := harness.AuthContext{TenantID: "tenant", SubjectID: "subject"}
+	other := harness.AuthContext{TenantID: "other", SubjectID: "subject"}
+
+	created, err := backend.EnsureWorkspace(auth, "ws-1", map[string]any{"name": "shared"})
+	if err != nil || created.WorkspaceID != "ws-1" {
+		t.Fatalf("EnsureWorkspace: %+v err=%v", created, err)
+	}
+	// Re-ensuring must be idempotent and must not overwrite metadata.
+	again, err := backend.EnsureWorkspace(auth, "ws-1", map[string]any{"name": "changed"})
+	if err != nil || again.Metadata["name"] != "shared" {
+		t.Fatalf("EnsureWorkspace not idempotent: %+v err=%v", again, err)
+	}
+
+	// Writing to a workspace that does not exist must fail with the same error
+	// on every backend.
+	if _, _, err := backend.PutTopicValue(auth, "ws-missing", "t", "k", map[string]any{"v": 1}, 0); !errors.Is(err, harness.ErrWorkspaceNotFound) {
+		t.Fatalf("PutTopicValue(missing workspace) err=%v, want ErrWorkspaceNotFound", err)
+	}
+
+	if _, ok, err := backend.PutTopicValue(auth, "ws-1", "results", "a", map[string]any{"value": 1}, 0); err != nil || !ok {
+		t.Fatalf("first topic write ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := backend.PutTopicValue(auth, "ws-1", "results", "a", map[string]any{"value": 2}, 0); err != nil || ok {
+		t.Fatalf("stale topic write ok=%v err=%v (want refused)", ok, err)
+	}
+	if _, ok, err := backend.PutTopicValue(auth, "ws-1", "results", "a", map[string]any{"value": 2}, 1); err != nil || !ok {
+		t.Fatalf("cas topic write ok=%v err=%v", ok, err)
+	}
+	values, err := backend.TopicValues(auth, "ws-1", "results")
+	if err != nil || len(values) != 1 || values[0].Version != 2 {
+		t.Fatalf("TopicValues=%+v err=%v", values, err)
+	}
+	if values[0].Digest == "" {
+		t.Fatal("TopicValues returned an empty digest")
+	}
+
+	// A second tenant sees its own workspace namespace, never the first one's.
+	if _, err := backend.EnsureWorkspace(other, "ws-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if values, err := backend.TopicValues(other, "ws-1", "results"); err != nil || len(values) != 0 {
+		t.Fatalf("cross-tenant visibility values=%+v err=%v", values, err)
+	}
+}
+
+func testMailboxDelivery(t *testing.T, store harness.Store) {
+	backend := asCollaboration(t, store)
+	auth := harness.AuthContext{TenantID: "tenant", SubjectID: "subject"}
+	mailbox := harness.NewMailbox(backend)
+
+	if _, err := backend.EnsureWorkspace(auth, "ws-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Posting to a workspace that does not exist must fail identically on every
+	// backend (the SQLite schema used to allow it).
+	if _, err := mailbox.Send(auth, harness.MailboxMessage{WorkspaceID: "ws-missing", Topic: "work", FromAgent: "a", MessageType: "result", Payload: map[string]any{}}); !errors.Is(err, harness.ErrWorkspaceNotFound) {
+		t.Fatalf("Send(missing workspace) err=%v, want ErrWorkspaceNotFound", err)
+	}
+
+	send := func(topic, idem string) harness.MailboxMessage {
+		t.Helper()
+		message, err := mailbox.Send(auth, harness.MailboxMessage{WorkspaceID: "ws-1", Topic: topic, FromAgent: "a", ToAgent: "b", MessageType: "result", IdempotencyKey: idem, Payload: map[string]any{"topic": topic}})
+		if err != nil {
+			t.Fatalf("Send(%s): %v", topic, err)
+		}
+		return message
+	}
+
+	first := send("work", "idem-1")
+	// Same key, same topic: deduplicated.
+	replayed := send("work", "idem-1")
+	if replayed.MessageID != first.MessageID {
+		t.Fatalf("same-topic idempotency lost: %s vs %s", replayed.MessageID, first.MessageID)
+	}
+	// Same key, DIFFERENT topic: a distinct message. The idempotency scope is
+	// one topic's sequence space, and both backends must agree on that.
+	other := send("other-topic", "idem-1")
+	if other.MessageID == first.MessageID {
+		t.Fatalf("idempotency key leaked across topics: %s", other.MessageID)
+	}
+	if other.Topic != "other-topic" {
+		t.Fatalf("returned message reports topic %q, want other-topic", other.Topic)
+	}
+
+	// Sequence is per topic and monotonic.
+	second := send("work", "idem-2")
+	if second.Sequence <= first.Sequence {
+		t.Fatalf("sequence not monotonic: %d then %d", first.Sequence, second.Sequence)
+	}
+
+	messages, err := mailbox.Receive(auth, "ws-1", "work", "b", 10)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("Receive len=%d err=%v", len(messages), err)
+	}
+	if messages[0].Sequence > messages[1].Sequence {
+		t.Fatalf("Receive is not ordered: %d then %d", messages[0].Sequence, messages[1].Sequence)
+	}
+
+	// A non-recipient must not be able to ack someone else's direct message.
+	if acked, err := mailbox.Ack(auth, first.MessageID, "c"); err != nil || acked {
+		t.Fatalf("cross-recipient ack ok=%v err=%v, want false", acked, err)
+	}
+	if messages, err := mailbox.Receive(auth, "ws-1", "work", "b", 10); err != nil || len(messages) != 2 {
+		t.Fatalf("message disappeared after a rejected ack: len=%d err=%v", len(messages), err)
+	}
+	if acked, err := mailbox.Ack(auth, first.MessageID, "b"); err != nil || !acked {
+		t.Fatalf("recipient ack ok=%v err=%v", acked, err)
+	}
+	if messages, err := mailbox.Receive(auth, "ws-1", "work", "b", 10); err != nil || len(messages) != 1 {
+		t.Fatalf("after ack len=%d err=%v, want 1", len(messages), err)
+	}
+	// Ack is idempotent.
+	if acked, err := mailbox.Ack(auth, first.MessageID, "b"); err != nil || !acked {
+		t.Fatalf("repeat ack ok=%v err=%v, want true", acked, err)
+	}
+
+	// Cross-tenant isolation.
+	other2 := harness.AuthContext{TenantID: "other", SubjectID: "subject"}
+	if _, err := backend.EnsureWorkspace(other2, "ws-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if messages, err := mailbox.Receive(other2, "ws-1", "work", "b", 10); err != nil || len(messages) != 0 {
+		t.Fatalf("cross-tenant mailbox len=%d err=%v", len(messages), err)
+	}
+}
+
+// testBroadcastAck pins the semantics that a broadcast belongs to every agent
+// on the topic: one recipient acknowledging it must not hide it from the rest.
+func testBroadcastAck(t *testing.T, store harness.Store) {
+	backend := asCollaboration(t, store)
+	auth := harness.AuthContext{TenantID: "tenant", SubjectID: "subject"}
+	mailbox := harness.NewMailbox(backend)
+	if _, err := backend.EnsureWorkspace(auth, "ws-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	broadcast, err := mailbox.Send(auth, harness.MailboxMessage{WorkspaceID: "ws-b", Topic: "announce", FromAgent: "lead", MessageType: "notice", Payload: map[string]any{"text": "kickoff"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, recipient := range []string{"a", "b"} {
+		messages, err := mailbox.Receive(auth, "ws-b", "announce", recipient, 10)
+		if err != nil || len(messages) != 1 {
+			t.Fatalf("broadcast to %s len=%d err=%v", recipient, len(messages), err)
+		}
+	}
+	if acked, err := mailbox.Ack(auth, broadcast.MessageID, "a"); err != nil || !acked {
+		t.Fatalf("broadcast ack ok=%v err=%v", acked, err)
+	}
+	if messages, err := mailbox.Receive(auth, "ws-b", "announce", "a", 10); err != nil || len(messages) != 0 {
+		t.Fatalf("acked recipient still sees broadcast: len=%d err=%v", len(messages), err)
+	}
+	// The other recipient must still receive it — this is what a single shared
+	// acked flag used to break.
+	if messages, err := mailbox.Receive(auth, "ws-b", "announce", "b", 10); err != nil || len(messages) != 1 {
+		t.Fatalf("broadcast hidden from the second recipient: len=%d err=%v", len(messages), err)
 	}
 }

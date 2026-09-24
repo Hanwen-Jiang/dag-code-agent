@@ -86,22 +86,23 @@ func (a AuthContext) HasScope(scope string) bool {
 }
 
 type TaskRequest struct {
-	TaskID          string         `json:"task_id"`
-	Goal            string         `json:"goal"`
-	TenantID        string         `json:"tenant_id"`
-	SubjectID       string         `json:"subject_id"`
-	Constraints     []string       `json:"constraints,omitempty"`
-	MaxSteps        int            `json:"max_steps"`
-	MaxToolCalls    int            `json:"max_tool_calls"`
-	ContextWindow   int            `json:"context_window_tokens"`
-	RequiredScopes  []string       `json:"required_scopes,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
-	Model           string         `json:"model,omitempty"`
-	ModelRevision   string         `json:"model_revision,omitempty"`
-	PolicyVersion   string         `json:"policy_version,omitempty"`
-	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
-	MaxOutputTokens int            `json:"max_output_tokens,omitempty"`
-	ResponseSchema  map[string]any `json:"response_schema,omitempty"`
+	TaskID          string           `json:"task_id"`
+	Goal            string           `json:"goal"`
+	TenantID        string           `json:"tenant_id"`
+	SubjectID       string           `json:"subject_id"`
+	Constraints     []string         `json:"constraints,omitempty"`
+	MaxSteps        int              `json:"max_steps"`
+	MaxToolCalls    int              `json:"max_tool_calls"`
+	ContextWindow   int              `json:"context_window_tokens"`
+	RequiredScopes  []string         `json:"required_scopes,omitempty"`
+	Metadata        map[string]any   `json:"metadata,omitempty"`
+	Model           string           `json:"model,omitempty"`
+	ModelRevision   string           `json:"model_revision,omitempty"`
+	PolicyVersion   string           `json:"policy_version,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
+	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
+	ResponseSchema  map[string]any   `json:"response_schema,omitempty"`
+	PreviousResults []PreviousResult `json:"previous_results,omitempty"`
 }
 
 func (r TaskRequest) WithDefaults() TaskRequest {
@@ -156,6 +157,7 @@ type TaskState struct {
 	LastError               map[string]any   `json:"last_error,omitempty"`
 	FinalAnswer             string           `json:"final_answer,omitempty"`
 	Metadata                map[string]any   `json:"metadata,omitempty"`
+	PreviousResults         []PreviousResult `json:"previous_results,omitempty"`
 }
 
 func (s TaskState) LastErrorString() string {
@@ -186,6 +188,9 @@ func (s *TaskState) Normalize() {
 	}
 	if s.Metadata == nil {
 		s.Metadata = map[string]any{}
+	}
+	if s.PreviousResults == nil {
+		s.PreviousResults = []PreviousResult{}
 	}
 }
 
@@ -316,6 +321,7 @@ type ContextPacket struct {
 	BudgetTokens    int              `json:"budget_tokens"`
 	PrefixCacheKey  string           `json:"prefix_cache_key,omitempty"`
 	PrefixCacheHit  bool             `json:"prefix_cache_hit"`
+	PreviousResults []map[string]any `json:"previous_results,omitempty"`
 }
 
 type SubagentSpec struct {

@@ -28,6 +28,8 @@ type runtimeConfig struct {
 	verifier       VerifyFunc
 	budget         *BudgetLedger
 	logger         *slog.Logger
+	workspaceStore WorkspaceStore
+	mailboxStore   MailboxStore
 }
 
 // WithStore injects the persistence backend. Without it, New creates a
@@ -159,6 +161,40 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithWorkspaceStore injects the durable Workspace/Topic projection. When
+// omitted, New uses the supplied CoreStore if it implements WorkspaceStore.
+func WithWorkspaceStore(store WorkspaceStore) Option {
+	return func(c *runtimeConfig) error {
+		if store == nil {
+			return errors.New("harness: WithWorkspaceStore requires a non-nil store")
+		}
+		c.workspaceStore = store
+		return nil
+	}
+}
+
+// WithMailboxStore injects the durable mailbox projection. When omitted, New
+// uses the supplied CoreStore if it implements MailboxStore.
+func WithMailboxStore(store MailboxStore) Option {
+	return func(c *runtimeConfig) error {
+		if store == nil {
+			return errors.New("harness: WithMailboxStore requires a non-nil store")
+		}
+		c.mailboxStore = store
+		return nil
+	}
+}
+
+// newMailboxOrNil avoids handing back a Mailbox whose Store is nil: such an
+// object is non-nil but fails every call, which hides a missing capability
+// behind an error instead of letting the caller check for it.
+func newMailboxOrNil(store MailboxStore) *Mailbox {
+	if store == nil {
+		return nil
+	}
+	return NewMailbox(store)
+}
+
 // New builds a runtime.
 //
 // New() with no options is a complete, working, offline runtime: an in-memory
@@ -233,6 +269,16 @@ func New(opts ...Option) (*Runtime, error) {
 	if cfg.logger == nil {
 		cfg.logger = slog.Default()
 	}
+	if cfg.workspaceStore == nil {
+		if candidate, ok := cfg.store.(WorkspaceStore); ok {
+			cfg.workspaceStore = candidate
+		}
+	}
+	if cfg.mailboxStore == nil {
+		if candidate, ok := cfg.store.(MailboxStore); ok {
+			cfg.mailboxStore = candidate
+		}
+	}
 	return &Runtime{
 		store:          cfg.store,
 		journal:        journal,
@@ -245,6 +291,8 @@ func New(opts ...Option) (*Runtime, error) {
 		budget:         cfg.budget,
 		clock:          cfg.clock,
 		logger:         cfg.logger,
+		workspaceStore: cfg.workspaceStore,
+		mailbox:        newMailboxOrNil(cfg.mailboxStore),
 		ownsStore:      cfg.ownsStore,
 		loopSeen:       map[string]map[string]int{},
 	}, nil

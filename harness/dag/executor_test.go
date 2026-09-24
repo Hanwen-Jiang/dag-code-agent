@@ -98,6 +98,65 @@ func TestReworkUsesFreshAttemptsAndArtifactContracts(t *testing.T) {
 	}
 }
 
+func TestHarnessNodeRunnerInjectsInputArtifactsAsPreviousResults(t *testing.T) {
+	m := testManifest(t)
+	store, err := h.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	model := &captureModel{response: h.ModelResponse{Text: "done", FinishReason: "stop"}}
+	runtime, err := h.New(h.WithStore(store), h.WithModel(model))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runner := &HarnessNodeRunner{Runtime: runtime, Auth: h.AuthContext{TenantID: "dag-tenant", SubjectID: "scheduler"}}
+	node := m.Nodes[0]
+	_, err = runner.Run(context.Background(), NodeExecutionContext{
+		RunID:           "previous-results",
+		ManifestID:      m.ManifestID,
+		SpecHash:        m.SpecHash,
+		Node:            node,
+		AttemptID:       "attempt-1",
+		Ordinal:         1,
+		AgentInstanceID: "agent-1",
+		InputArtifacts:  []Artifact{{ArtifactID: "ART-IN", NodeID: "producer", ContractID: "RESULT", SHA256: mustDigest(map[string]any{"answer": "42"}), Content: map[string]any{"answer": "42"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) == 0 || !strings.Contains(providerMessagesText(model.requests[0].Messages), "ART-IN") {
+		t.Fatalf("previous result missing from model request: %#v", model.requests)
+	}
+}
+
+type captureModel struct {
+	requests []h.ModelRequest
+	response h.ModelResponse
+}
+
+func (m *captureModel) Name() string { return "capture" }
+func (m *captureModel) Complete(_ context.Context, request h.ModelRequest) (h.ModelResponse, error) {
+	m.requests = append(m.requests, request)
+	return m.response, nil
+}
+func (m *captureModel) Stream(ctx context.Context, request h.ModelRequest) (<-chan h.StreamEvent, error) {
+	out := make(chan h.StreamEvent, 1)
+	close(out)
+	return out, nil
+}
+
+func providerMessagesText(messages []map[string]any) string {
+	var parts []string
+	for _, message := range messages {
+		if content, ok := message["content"].(string); ok {
+			parts = append(parts, content)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 func TestCrashRecoveryMarksInflightAttemptAbandoned(t *testing.T) {
 	m := testManifest(t)
 	executor, store := testExecutor(t, m, nil)
@@ -225,5 +284,49 @@ func TestManifestValidation(t *testing.T) {
 	cycle.Edges = append(append([]Edge{}, m.Edges...), Edge{EdgeID: "cycle", FromNode: "N-UAT", ToNode: "N-DESIGN", EdgeType: "CONTROL", Gating: true})
 	if err := ValidateManifest(cycle); err == nil {
 		t.Fatal("cycle accepted")
+	}
+}
+
+// A hand-off that claims a digest must prove it. This is what stops a producer
+// from handing over a value that differs from what it committed.
+func TestPreviousResultWithMismatchedDigestIsRefused(t *testing.T) {
+	store, err := h.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	model := &captureModel{response: h.ModelResponse{Text: "done", FinishReason: "stop"}}
+	runtime, err := h.New(h.WithStore(store), h.WithModel(model))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	m := testManifest(t)
+	runner := &HarnessNodeRunner{Runtime: runtime, Auth: h.AuthContext{TenantID: "dag-tenant", SubjectID: "scheduler"}}
+	// The digest is computed over one payload while Content carries another.
+	result, err := runner.Run(context.Background(), NodeExecutionContext{
+		RunID:           "previous-results-tampered",
+		ManifestID:      m.ManifestID,
+		SpecHash:        m.SpecHash,
+		Node:            m.Nodes[0],
+		AttemptID:       "attempt-1",
+		Ordinal:         1,
+		AgentInstanceID: "agent-1",
+		InputArtifacts: []Artifact{{
+			ArtifactID: "ART-IN", NodeID: "producer", ContractID: "RESULT",
+			SHA256:  mustDigest(map[string]any{"answer": "41"}),
+			Content: map[string]any{"answer": "42"},
+		}},
+	})
+	// A rejected hand-off is a task-level failure (category CONTEXT), so the
+	// node reports FAILED rather than returning an infrastructure error.
+	if err != nil {
+		t.Fatalf("runner returned an infrastructure error: %v", err)
+	}
+	if result.Status != "FAILED" || !strings.Contains(result.ErrorMessage, "DIGEST_MISMATCH") {
+		t.Fatalf("result=%+v, want FAILED with a digest mismatch", result)
+	}
+	if len(model.requests) != 0 {
+		t.Fatalf("the model was called with an unverified hand-off: %#v", model.requests)
 	}
 }

@@ -200,6 +200,15 @@ func (r *HarnessNodeRunner) Run(ctx context.Context, nodeCtx NodeExecutionContex
 		return NodeExecutionResult{Status: "FAILED", ErrorCode: "NO_RUNTIME"}, nil
 	}
 	request := h.TaskRequest{TaskID: "dag:" + nodeCtx.RunID + ":" + nodeCtx.Node.NodeID + ":" + nodeCtx.AttemptID, Goal: nodeCtx.Node.Objective, TenantID: r.Auth.TenantID, SubjectID: r.Auth.SubjectID, MaxSteps: 8, ContextWindow: 4096, Constraints: nodeCtx.ExactConstraints}
+	for _, artifact := range nodeCtx.InputArtifacts {
+		request.PreviousResults = append(request.PreviousResults, h.PreviousResult{
+			ResultID: artifact.ArtifactID,
+			SourceID: artifact.NodeID,
+			Kind:     artifact.ContractID,
+			Digest:   artifact.SHA256,
+			Value:    artifact.Content,
+		})
+	}
 	result, runErr := r.Runtime.Run(ctx, request, r.Auth)
 	if runErr != nil {
 		// A control-plane failure is operational, not a node verdict, so it
@@ -648,7 +657,11 @@ func (e *Executor) ResumeUser(runID, outcome, actor string) (Report, error) {
 	s.NodeStates[nodeID] = NodeSucceeded
 	s.CompletedOrder = append(s.CompletedOrder, nodeID)
 	s.WaitingNodeID = ""
-	s.Artifacts = append(s.Artifacts, Artifact{ArtifactID: "ART-" + runID + "-" + nodeID + "-UAT", ContractID: firstContract(node), NodeID: nodeID, AttemptID: "USER-" + actor, SHA256: mustDigest(map[string]any{"outcome": outcome}), MediaType: "application/json", Content: map[string]any{"outcome": outcome, "actor": actor}})
+	// The digest must cover the whole artifact. It used to be computed over
+	// {"outcome"} only while Content also carried "actor", so the recorded
+	// digest could not detect a changed actor.
+	uatContent := map[string]any{"outcome": outcome, "actor": actor}
+	s.Artifacts = append(s.Artifacts, Artifact{ArtifactID: "ART-" + runID + "-" + nodeID + "-UAT", ContractID: firstContract(node), NodeID: nodeID, AttemptID: "USER-" + actor, SHA256: mustDigest(uatContent), MediaType: "application/json", Content: uatContent})
 	s.Evidence = append(s.Evidence, Evidence{EvidenceID: h.NewID("EVID"), NodeID: nodeID, AttemptID: "USER-" + actor, Verdict: "PASS", Method: "user-acceptance", Observed: outcome})
 	s.Status = "RUNNING"
 	if err := e.persist(s, task, "USER_GATE_ACCEPTED", map[string]any{"node_id": nodeID, "outcome": outcome, "actor": actor}, Options{}); err != nil {
