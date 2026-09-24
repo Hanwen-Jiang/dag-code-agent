@@ -190,7 +190,24 @@ func (r *Runtime) finish(ctx context.Context, result RunResult) (RunResult, erro
 // durable result. Calling it with an existing task id resumes that task
 // instead of starting over.
 func (r *Runtime) Run(ctx context.Context, request TaskRequest, auth AuthContext) (RunResult, error) {
-	return r.finish(ctx, r.run(ctx, request, auth))
+	result, err := r.finish(ctx, r.run(ctx, request, auth))
+	r.logRun(result, err)
+	return result, err
+}
+
+// logRun reports one durable outcome. It is deliberately debug-level: an
+// embedded control plane must not spam the host application's logs.
+func (r *Runtime) logRun(result RunResult, err error) {
+	if r.logger == nil {
+		return
+	}
+	r.logger.Debug("harness run finished",
+		"task_id", result.TaskID,
+		"status", result.Status,
+		"failure_category", result.FailureCategory,
+		"steps", result.State.Step,
+		"events", len(result.Events),
+		"err", err)
 }
 
 // Resume answers an open user gate.
