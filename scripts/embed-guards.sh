@@ -66,6 +66,23 @@ echo "== G6: the conformance suite passes for every backend (abstraction) =="
 guard "storetest passes for SQLiteStore and InMemoryStore" go test ./harness/storetest/
 
 echo
+echo "== G7: dependency budget (regression guard) =="
+# Design 9.2: at most 4 direct third-party dependencies in the core (currently
+# 2: jsonschema + modernc.org/sqlite). A new heavy import must be a deliberate
+# decision rather than an accident.
+direct=$(go list -f '{{range .Imports}}{{println .}}{{end}}' ./harness 2>/dev/null \
+  | grep -E '\.' | grep -v '^github.com/Hanwen-Jiang/dag-code-agent/' | sort -u | wc -l | tr -d ' ')
+if [[ "$direct" -le 4 ]]; then
+  ok "core has $direct direct third-party dependencies (budget 4)"
+else
+  bad "core has $direct direct third-party dependencies (budget 4)"
+fi
+
+echo
+echo "== G8: multi-instance embedding contract (lifecycle) =="
+guard "two runtimes in one process stay isolated" go test -count=1 -run TestMultipleInstancesInOneProcess ./harness/
+
+echo
 echo "== self-test (guards must be able to fail) =="
 if [[ "${1:-}" == "--self-test" ]]; then
   # Plant a real violation, prove G3 notices it, then remove it even on ^C.

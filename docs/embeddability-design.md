@@ -535,6 +535,13 @@ func resolveManifest() (dag.Manifest, error) { /* 原 loadDAGManifest 逻辑 */ 
 
 ### 8.2 验证
 
+已实现为 `harness/embedding_test.go` 的 `TestMultipleInstancesInOneProcess`（护栏 G8）：
+
+- 一进程内两个 runtime + 两个独立 Store，使用**相同 task id** 互不冲突；
+- 各自 journal 只校验自己的链；
+- `New()` 自建的 store 由 runtime 关闭；`WithStore` 注入的 store **不**被 runtime 关闭
+  （`Runtime.Close` 依据 `ownsStore` 判定，见 §8.1）。
+
 ```go
 func TestMultipleInstancesInOneProcess(t *testing.T) {
     a, _ := harness.New(harness.WithStore(memStoreA))
@@ -607,6 +614,22 @@ cd examples/embed_external && go build ./...
 ```
 
 任一条失败即 CI 红。**C1–C4 验收标准由此变成机器执行的检查**。
+
+**实施时新增的两条护栏**（`scripts/embed-guards.sh` 实际实现 G1–G8）：
+
+| 护栏 | 作用 |
+|---|---|
+| **G6** | `harness/storetest` 必须对每个后端通过——把「抽象是真的」变成可执行断言 |
+| **G7** | 核心直接第三方依赖数 ≤ 4（当前 2）——依赖预算防回退，见 §9.2 |
+| **G8** | `TestMultipleInstancesInOneProcess`——一进程多实例隔离与生命周期契约，见 §8 |
+
+脚本支持 `--self-test`：它会**故意植入一行 `os.Getenv`**，断言 G3 必须变红，然后清理。
+这保证护栏本身不会退化成永远通过的空转检查（CI 即以此模式运行）。
+
+```
+$ ./scripts/embed-guards.sh --self-test
+PASS: 9   FAIL: 0
+```
 
 ---
 
