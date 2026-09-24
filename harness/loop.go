@@ -144,7 +144,7 @@ type LoopState struct {
 	TurnID string
 	Step   int
 	Turns  int
-	Plan   []string
+	Plan   []PlanStep
 
 	Budget BudgetSnapshot
 

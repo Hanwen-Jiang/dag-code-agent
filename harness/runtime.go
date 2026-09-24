@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"strings"
 	"sync"
-	"time"
 )
 
 type RuntimeError struct {
@@ -58,6 +58,11 @@ type Runtime struct {
 	mailbox        *Mailbox
 	ownsStore      bool
 
+	// strategy decides the loop topology; strategies is the registry that
+	// names resolve against.
+	strategy   Strategy
+	strategies *StrategyRegistry
+
 	mu       sync.Mutex
 	loopSeen map[string]map[string]int
 }
@@ -82,6 +87,27 @@ func (r *Runtime) Memory() *MemoryManager { return r.memory }
 
 // Clock returns the time source used by this runtime.
 func (r *Runtime) Clock() Clock { return r.clock }
+
+// Strategy returns the loop topology this runtime runs.
+func (r *Runtime) Strategy() Strategy { return r.strategy }
+
+// Strategies lists the registered topologies, for introspection.
+func (r *Runtime) Strategies() []StrategyInfo {
+	if r.strategies == nil {
+		return nil
+	}
+	return r.strategies.List()
+}
+
+// RegisterStrategy adds a topology to this runtime's registry. It fails when
+// the name is already taken at a different version: silently replacing a
+// topology would replay historical runs under new semantics.
+func (r *Runtime) RegisterStrategy(strategy Strategy) error {
+	if r.strategies == nil {
+		r.strategies = NewStrategyRegistry()
+	}
+	return r.strategies.Register(strategy)
+}
 
 // WorkspaceStore exposes the optional shared-state projection.
 func (r *Runtime) WorkspaceStore() WorkspaceStore { return r.workspaceStore }
@@ -293,195 +319,107 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 	if state.Status == TaskCompleted || state.Status == TaskFailed || state.Status == TaskCancelled {
 		return r.result(state, "")
 	}
+	// A journal that already ran under a different topology must not continue
+	// under this one: replaying a task with different decisions would produce a
+	// trajectory that never happened.
+	if err := r.verifyStrategyIdentity(state); err != nil {
+		return r.failAndCommit(state, "STRATEGY", err)
+	}
 	state.Status = TaskRunning
 	state.Turns++
 	state.CurrentTurnID = NewID("TURN")
 	if err := r.commitEvent(&state, "TURN_STARTED", map[string]any{
-		"turn_id": state.CurrentTurnID,
-		"turn":    state.Turns,
-		"resumed": state.Step > 0 || len(state.UserMessages) > 0,
+		"turn_id":  state.CurrentTurnID,
+		"turn":     state.Turns,
+		"resumed":  state.Step > 0 || len(state.UserMessages) > 0,
+		"strategy": strategyIdentity(r.strategy),
 	}); err != nil {
 		return r.failAndCommit(state, "STORE", err)
 	}
-	seen := r.loopSeen[taskID]
-	if seen == nil {
-		seen = map[string]int{}
-		r.loopSeen[taskID] = seen
+	kernel := &loopKernel{
+		runtime:  r,
+		strategy: r.strategy,
+		request:  request,
+		auth:     auth,
+		scratch:  loadStrategyScratch(state),
+		rng:      newStrategyRand(state.TaskID, r.strategy),
 	}
-	for state.Step < request.MaxSteps {
-		select {
-		case <-ctx.Done():
-			state.Status = TaskCancelled
-			state.LastError = map[string]any{"code": "CANCELLED", "message": ctx.Err().Error()}
-			_ = r.commitEvent(&state, "TURN_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "status": TaskCancelled, "reason": "context_cancelled"})
-			_ = r.commitEvent(&state, "TASK_CANCELLED", state.LastError)
-			return r.result(state, "")
-		default:
-		}
-		stepNumber := state.Step + 1
-		if err := r.commitEvent(&state, "STEP_STARTED", map[string]any{
-			"turn_id": state.CurrentTurnID,
-			"step":    stepNumber,
-		}); err != nil {
-			return r.failAndCommit(state, "STORE", err)
-		}
-		packet, err := r.contextBuilder.Build(request, auth, state, nil)
-		if err != nil {
-			return r.failAndCommit(state, "CONTEXT", err)
-		}
-		modelRequest := ModelRequest{TaskID: taskID, Messages: packet.ProviderMessages(), Tools: packet.Tools, ResponseSchema: request.ResponseSchema, Model: request.Model, ReasoningEffort: request.ReasoningEffort, MaxOutputTokens: request.MaxOutputTokens, PrefixCacheKey: packet.PrefixCacheKey}
-		requestDigest, _ := Digest(modelRequest)
-		state.LastModelRequestDigest = requestDigest
-		if err := r.commitEvent(&state, "CONTEXT_COMPILED", map[string]any{
-			"turn_id":          state.CurrentTurnID,
-			"step":             stepNumber,
-			"compiler_version": r.contextBuilder.CompilerVersion,
-			"estimated_tokens": packet.EstimatedTokens,
-			"budget_tokens":    packet.BudgetTokens,
-			"prefix_cache_key": packet.PrefixCacheKey,
-			"prefix_cache_hit": packet.PrefixCacheHit,
-			"exact_invariants": packet.ExactInvariants,
-		}); err != nil {
-			return r.failAndCommit(state, "STORE", err)
-		}
-		// The complete provider projection is logged before the adapter is
-		// called. This is the Harness invariant that model-visible input can be
-		// reconstructed from the event journal alone.
-		if err := r.commitEvent(&state, "MODEL_REQUESTED", map[string]any{
-			"turn_id":        state.CurrentTurnID,
-			"step":           stepNumber,
-			"request_digest": requestDigest,
-			"model_request":  modelRequest,
-		}); err != nil {
-			return r.failAndCommit(state, "STORE", err)
-		}
-		started := time.Now()
-		response, err := r.model.Complete(ctx, modelRequest)
-		if err != nil {
-			category := "MODEL"
-			if me, ok := err.(*ModelError); ok && !me.Retryable {
-				category = "MODEL_PERMANENT"
-			}
-			return r.failAndCommit(state, category, err)
-		}
-		response.Usage.LatencyMS = float64(time.Since(started).Microseconds()) / 1000
-		state.ModelRound++
-		state.Step++
-		state.InputTokens += response.Usage.InputTokens
-		state.OutputTokens += response.Usage.OutputTokens
-		state.CachedTokens += response.Usage.CachedInputTokens
-		state.CostUSD += response.Usage.CostUSD
-		responseDigest, _ := Digest(response)
-		state.LastModelResponseDigest = responseDigest
-		if err := r.commitEvent(&state, "MODEL_PROPOSED", map[string]any{
-			"turn_id":         state.CurrentTurnID,
-			"step":            stepNumber,
-			"request_digest":  requestDigest,
-			"response_digest": responseDigest,
-			"response":        modelResponsePayload(response),
-		}); err != nil {
-			return r.failAndCommit(state, "STORE", err)
-		}
-		if r.budget != nil {
-			if err := r.budget.Charge(response.Usage, len(response.ToolCalls)); err != nil {
-				return r.failAndCommit(state, "BUDGET", err)
-			}
-		}
-		if response.NeedUser != nil {
-			state.Status = TaskWaitingUser
-			state.Metadata["pending_user"] = response.NeedUser
-			state.Observations = append(state.Observations, map[string]any{"type": "need_user", "data": response.NeedUser})
-			if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "user_gate"}); err != nil {
-				return r.failAndCommit(state, "STORE", err)
-			}
-			if err := r.commitEvent(&state, "USER_GATE_OPENED", map[string]any{"turn_id": state.CurrentTurnID, "gate": response.NeedUser}); err != nil {
-				return r.failAndCommit(state, "STORE", err)
-			}
-			_ = r.commitEvent(&state, "TURN_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "status": TaskWaitingUser})
-			return r.result(state, "")
-		}
-		if len(response.ToolCalls) > 0 {
-			if state.ToolCalls+len(response.ToolCalls) > request.MaxToolCalls {
-				return r.failAndCommit(state, "BUDGET", errors.New("TOOL_BUDGET_EXCEEDED"))
-			}
-			toolObservations := []map[string]any{}
-			for _, call := range response.ToolCalls {
-				fingerprint, _ := Digest(map[string]any{"name": call.Name, "arguments": call.Arguments})
-				seen[fingerprint]++
-				if seen[fingerprint] > 3 {
-					return r.failAndCommit(state, "LOOP", errors.New("LOOP_DETECTED"))
-				}
-				if err := r.commitEvent(&state, "TOOL_INVOKED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "call": toolCallPayload(call)}); err != nil {
-					return r.failAndCommit(state, "STORE", err)
-				}
-				result := r.tools.Execute(ctx, call, auth)
-				state.ToolCalls++
-				observation := map[string]any{"tool": call.Name, "call_id": call.CallID, "status": result.Status, "value": result.Value, "error_code": result.ErrorCode, "attempts": result.Attempts}
-				toolObservations = append(toolObservations, observation)
-				state.Observations = append(state.Observations, observation)
-				if err := r.commitEvent(&state, "TOOL_OBSERVED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "call_id": call.CallID, "observation": observation}); err != nil {
-					return r.failAndCommit(state, "STORE", err)
-				}
-			}
-			if err := r.commitEvent(&state, "TOOLS_EXECUTED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "results": toolObservations}); err != nil {
-				return r.failAndCommit(state, "STORE", err)
-			}
-			if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "tool_calls"}); err != nil {
-				return r.failAndCommit(state, "STORE", err)
-			}
+	return kernel.run(ctx, state)
+}
+
+// strategyIdentity is the journaled form of a topology. Name plus version, so a
+// replay can tell whether the decisions that produced a trajectory are the ones
+// being replayed.
+func strategyIdentity(strategy Strategy) map[string]any {
+	if strategy == nil {
+		return map[string]any{"name": "none", "version": ""}
+	}
+	return map[string]any{"name": strategy.Name(), "version": strategy.Version()}
+}
+
+// verifyStrategyIdentity compares the topology recorded in the journal with the
+// one about to run. Recording without checking would be decorative.
+func (r *Runtime) verifyStrategyIdentity(state TaskState) error {
+	events, err := r.store.Events(state.TaskID)
+	if err != nil || len(events) == 0 {
+		return nil
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != "TURN_STARTED" {
 			continue
 		}
-		if len(response.SubagentRequests) > 0 {
-			state.Observations = append(state.Observations, map[string]any{"type": "subagents_requested", "count": len(response.SubagentRequests)})
-			if err := r.commitEvent(&state, "SUBAGENTS_REQUESTED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "requests": response.SubagentRequests}); err != nil {
-				return r.failAndCommit(state, "STORE", err)
-			}
-			if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "subagents"}); err != nil {
-				return r.failAndCommit(state, "STORE", err)
-			}
-			continue
+		recorded, ok := events[i].Payload["strategy"].(map[string]any)
+		if !ok {
+			// Journals written before strategy identity existed carry no claim.
+			return nil
 		}
-		if strings.TrimSpace(response.Text) == "" {
-			return r.failAndCommit(state, "MODEL_OUTPUT", errors.New("empty model response"))
+		name, _ := recorded["name"].(string)
+		version, _ := recorded["version"].(string)
+		current := strategyIdentity(r.strategy)
+		if name != current["name"] || version != current["version"] {
+			return fmt.Errorf("%w: task ran under %s@%s but this runtime uses %v@%v",
+				ErrStrategyContract, name, version, current["name"], current["version"])
 		}
-		if err := ValidateStructured(response.Text, request.ResponseSchema); err != nil {
-			return r.failAndCommit(state, "STRUCTURED_OUTPUT", err)
-		}
-		if r.verifier != nil {
-			if err := r.verifier(state, response.Text); err != nil {
-				state.RetryCount++
-				state.LastError = map[string]any{"code": "VERIFIER_FAILED", "message": err.Error()}
-				state.Observations = append(state.Observations, state.LastError)
-				if state.RetryCount >= 2 {
-					return r.failAndCommit(state, "VERIFIER", err)
-				}
-				if commitErr := r.commitEvent(&state, "VERIFIER_REJECTED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "error": state.LastError}); commitErr != nil {
-					return r.failAndCommit(state, "STORE", commitErr)
-				}
-				if commitErr := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "verifier_rejected"}); commitErr != nil {
-					return r.failAndCommit(state, "STORE", commitErr)
-				}
-				continue
-			}
-		}
-		state.Status = TaskCompleted
-		state.FinalAnswer = response.Text
-		state.Observations = append(state.Observations, map[string]any{"type": "final", "text": response.Text})
-		if r.memory != nil {
-			_, _ = r.memory.Write(auth, "episodic", "tasks", taskID, response.Text, nil, .8, "", 0)
-		}
-		if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "final"}); err != nil {
-			return r.failAndCommit(state, "STORE", err)
-		}
-		if err := r.commitEvent(&state, "TURN_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "status": TaskCompleted}); err != nil {
-			return r.failAndCommit(state, "STORE", err)
-		}
-		if err := r.commitEvent(&state, "TASK_COMPLETED", map[string]any{"final_answer": response.Text, "model_round": state.ModelRound, "turn_id": state.CurrentTurnID}); err != nil {
-			return r.failAndCommit(state, "STORE", err)
-		}
-		return r.result(state, response.Text)
+		return nil
 	}
-	return r.failAndCommit(state, "LIMIT", errors.New("MAX_STEPS_EXCEEDED"))
+	return nil
+}
+
+// loadStrategyScratch reads strategy-private state from the task metadata, so a
+// resumed run observes what the strategy left behind.
+func loadStrategyScratch(state TaskState) map[string]any {
+	scratch := map[string]any{}
+	raw, ok := state.Metadata[strategyScratchKey]
+	if !ok {
+		return scratch
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return scratch
+	}
+	if err := json.Unmarshal(encoded, &scratch); err != nil {
+		return map[string]any{}
+	}
+	return scratch
+}
+
+// strategyScratchKey is where strategy-private state is persisted. Keeping it
+// in the task metadata means it travels with the checkpoint for free.
+const strategyScratchKey = "strategy_scratch"
+
+// newStrategyRand seeds the sanctioned randomness source from the task and the
+// topology, so a replayed run draws the same numbers.
+func newStrategyRand(taskID string, strategy Strategy) *rand.Rand {
+	name := "none"
+	if strategy != nil {
+		name = strategy.Name() + "@" + strategy.Version()
+	}
+	seed, _ := Digest(map[string]any{"task_id": taskID, "strategy": name})
+	var h uint64
+	for _, b := range []byte(seed) {
+		h = h*1099511628211 ^ uint64(b)
+	}
+	return rand.New(rand.NewSource(int64(h)))
 }
 
 func requestFromState(state TaskState) TaskRequest {

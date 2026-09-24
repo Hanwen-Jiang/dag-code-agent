@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 )
 
 // Option configures a Runtime built by New.
@@ -30,6 +31,9 @@ type runtimeConfig struct {
 	logger         *slog.Logger
 	workspaceStore WorkspaceStore
 	mailboxStore   MailboxStore
+	strategies     *StrategyRegistry
+	strategy       Strategy
+	strategyName   string
 }
 
 // WithStore injects the persistence backend. Without it, New creates a
@@ -153,6 +157,42 @@ func WithBudget(budget *BudgetLedger) Option {
 	}
 }
 
+// WithStrategyRegistry supplies the registry used to resolve WithStrategy.
+func WithStrategyRegistry(registry *StrategyRegistry) Option {
+	return func(c *runtimeConfig) error {
+		if registry == nil {
+			return errors.New("harness: WithStrategyRegistry requires a non-nil registry")
+		}
+		c.strategies = registry
+		return nil
+	}
+}
+
+// WithStrategy selects the loop topology by name from the registry. The
+// built-in "react" strategy is always available.
+func WithStrategy(name string) Option {
+	return func(c *runtimeConfig) error {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return errors.New("harness: WithStrategy requires a name")
+		}
+		c.strategyName = trimmed
+		return nil
+	}
+}
+
+// WithStrategyInstance injects a strategy value directly, without registering
+// it. Use it for one-off topologies.
+func WithStrategyInstance(strategy Strategy) Option {
+	return func(c *runtimeConfig) error {
+		if strategy == nil {
+			return errors.New("harness: WithStrategyInstance requires a non-nil strategy")
+		}
+		c.strategy = strategy
+		return nil
+	}
+}
+
 // WithLogger sets the structured logger used for lifecycle diagnostics.
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *runtimeConfig) error {
@@ -269,6 +309,20 @@ func New(opts ...Option) (*Runtime, error) {
 	if cfg.logger == nil {
 		cfg.logger = slog.Default()
 	}
+	if cfg.strategies == nil {
+		cfg.strategies = NewStrategyRegistry(ReActStrategy{})
+	}
+	if cfg.strategy == nil {
+		name := cfg.strategyName
+		if name == "" {
+			name = reactStrategyName
+		}
+		resolved, ok := cfg.strategies.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("harness: strategy %q is not registered", name)
+		}
+		cfg.strategy = resolved
+	}
 	if cfg.workspaceStore == nil {
 		if candidate, ok := cfg.store.(WorkspaceStore); ok {
 			cfg.workspaceStore = candidate
@@ -294,6 +348,8 @@ func New(opts ...Option) (*Runtime, error) {
 		workspaceStore: cfg.workspaceStore,
 		mailbox:        newMailboxOrNil(cfg.mailboxStore),
 		ownsStore:      cfg.ownsStore,
+		strategies:     cfg.strategies,
+		strategy:       cfg.strategy,
 		loopSeen:       map[string]map[string]int{},
 	}, nil
 }
