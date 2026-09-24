@@ -31,12 +31,15 @@ func main() {
 		SubjectID: "developer",
 		Scopes:    []string{"memory:read", "artifact:read", "artifact:write"},
 	}
-	result := runtime.Run(context.Background(), harness.TaskRequest{
+	result, runErr := runtime.Run(context.Background(), harness.TaskRequest{
 		TaskID:    "example-offline",
 		Goal:      "summarise what the control plane guarantees",
 		TenantID:  auth.TenantID,
 		SubjectID: auth.SubjectID,
 	}, auth)
+	if runErr != nil {
+		log.Fatalf("Run: %v", runErr)
+	}
 
 	fmt.Printf("status=%s events=%d steps=%d\n", result.Status, len(result.Events), result.State.Step)
 	fmt.Println(result.FinalAnswer)

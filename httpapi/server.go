@@ -187,7 +187,11 @@ func (s *Server) harnessDemo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer env.Store.Close()
-	result := env.Run(r.Context())
+	result, runErr := env.Run(r.Context())
+	if runErr != nil {
+		writeRunError(w, runErr)
+		return
+	}
 	writeJSON(w, http.StatusOK, harnessResponse(env, result))
 }
 
@@ -267,8 +271,12 @@ func (s *Server) createHarnessRun(w http.ResponseWriter, r *http.Request) {
 	s.runs[input.TaskID] = session
 	s.runsMu.Unlock()
 	session.mu.Lock()
-	result := env.Run(r.Context())
+	result, runErr := env.Run(r.Context())
 	session.mu.Unlock()
+	if runErr != nil {
+		writeRunError(w, runErr)
+		return
+	}
 	writeJSON(w, http.StatusAccepted, harnessResponse(env, result))
 }
 
@@ -313,15 +321,23 @@ func (s *Server) harnessRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session.mu.Lock()
-		result := session.env.Runtime.SendMessage(r.Context(), taskID, input.Message, session.auth)
+		result, runErr := session.env.Runtime.SendMessage(r.Context(), taskID, input.Message, session.auth)
 		session.mu.Unlock()
+		if runErr != nil {
+			writeRunError(w, runErr)
+			return
+		}
 		writeJSON(w, http.StatusOK, harnessResponse(session.env, result))
 		return
 	}
 	if len(parts) >= 2 && parts[1] == "cancel" && r.Method == http.MethodPost {
 		session.mu.Lock()
-		result := session.env.Runtime.Cancel(taskID, session.auth)
+		result, runErr := session.env.Runtime.Cancel(taskID, session.auth)
 		session.mu.Unlock()
+		if runErr != nil {
+			writeRunError(w, runErr)
+			return
+		}
 		writeJSON(w, http.StatusOK, harnessResponse(session.env, result))
 		return
 	}
@@ -610,6 +626,25 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }
+// writeRunError maps a runtime error onto an HTTP status.
+//
+// The runtime distinguishes an operational failure (503, retryable) from a
+// cancelled request (499-style client abort -> 408) so that a caller can tell
+// "the control plane is broken" from "the agent did not succeed" (which is a
+// normal 200 payload with Status=FAILED).
+func writeRunError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		writeJSON(w, http.StatusRequestTimeout, map[string]any{"error": "RUN_CANCELLED", "detail": err.Error()})
+	case errors.Is(err, context.DeadlineExceeded):
+		writeJSON(w, http.StatusGatewayTimeout, map[string]any{"error": "RUN_DEADLINE_EXCEEDED", "detail": err.Error()})
+	case errors.Is(err, harness.ErrInfrastructure):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "CONTROL_PLANE_UNAVAILABLE", "detail": err.Error()})
+	default:
+		writeError(w, err)
+	}
+}
+
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	if errors.Is(err, harness.ErrNotFound) {

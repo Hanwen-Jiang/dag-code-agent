@@ -20,7 +20,10 @@ func TestOfflineDemoClosesLoopAndReplays(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer env.Store.Close()
-	result := env.Run(context.Background())
+	result, err := env.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if result.Status != TaskCompleted {
 		t.Fatalf("status=%s error=%v", result.Status, result.State.LastError)
 	}
@@ -114,17 +117,26 @@ func newRuntimeForTest(t *testing.T, responses []ModelResponse) (*Runtime, Store
 func TestUserGateResumeAndImmutableTaskIdentity(t *testing.T) {
 	runtime, store, auth, request := newRuntimeForTest(t, []ModelResponse{{NeedUser: map[string]any{"kind": "approval", "question": "continue?"}}, {Text: "done"}})
 	defer store.Close()
-	waiting := runtime.Run(context.Background(), request, auth)
+	waiting, err := runtime.Run(context.Background(), request, auth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if waiting.Status != TaskWaitingUser {
 		t.Fatalf("status=%s", waiting.Status)
 	}
-	resumed := runtime.Resume(context.Background(), request.TaskID, "continue", auth)
+	resumed, err := runtime.Resume(context.Background(), request.TaskID, "continue", auth)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
 	if resumed.Status != TaskCompleted || resumed.FinalAnswer != "done" {
 		t.Fatalf("resumed=%+v", resumed)
 	}
 	changed := request
 	changed.Goal = "different goal"
-	conflict := runtime.Run(context.Background(), changed, auth)
+	conflict, err := runtime.Run(context.Background(), changed, auth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if conflict.Status != TaskFailed || !strings.Contains(conflict.State.LastErrorString(), "TASK_IDENTITY_MISMATCH") {
 		t.Fatalf("conflict=%+v", conflict.State.LastError)
 	}
@@ -136,8 +148,14 @@ func TestTerminalTaskStatesAreMonotonic(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer env.Store.Close()
-	completed := env.Run(context.Background())
-	resumed := env.Runtime.Resume(context.Background(), completed.TaskID, "late input", env.Auth)
+	completed, err := env.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	resumed, err := env.Runtime.Resume(context.Background(), completed.TaskID, "late input", env.Auth)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
 	if resumed.Status != TaskCompleted || resumed.FailureCategory != "STATE" {
 		t.Fatalf("resume terminal=%+v", resumed)
 	}
@@ -157,11 +175,17 @@ func TestTerminalTaskStatesAreMonotonic(t *testing.T) {
 	}
 	defer failedEnv.Store.Close()
 	failedEnv.Model.responses = nil
-	failed := failedEnv.Run(context.Background())
+	failed, err := failedEnv.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if failed.Status != TaskFailed {
 		t.Fatalf("failed status=%s", failed.Status)
 	}
-	cancelled := failedEnv.Runtime.Cancel(failed.TaskID, failedEnv.Auth)
+	cancelled, err := failedEnv.Runtime.Cancel(failed.TaskID, failedEnv.Auth)
+	if err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
 	if cancelled.Status != TaskFailed {
 		t.Fatalf("cancel rewrote failed task=%+v", cancelled)
 	}
@@ -172,7 +196,10 @@ func TestLoopAndContextBudgetTerminateDeterministically(t *testing.T) {
 	runtime, store, auth, request := newRuntimeForTest(t, []ModelResponse{{ToolCalls: []ToolCall{call}}, {ToolCalls: []ToolCall{call}}, {ToolCalls: []ToolCall{call}}, {ToolCalls: []ToolCall{call}}})
 	defer store.Close()
 	_ = runtime.Tools().Registry.Register(ToolSpec{Name: "echo", Description: "echo", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}, "required": []string{"value"}}, Handler: func(args map[string]any, _ AuthContext) (any, error) { return args, nil }})
-	looped := runtime.Run(context.Background(), request, auth)
+	looped, err := runtime.Run(context.Background(), request, auth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if looped.Status != TaskFailed || looped.FailureCategory != "LOOP" {
 		t.Fatalf("loop=%+v", looped)
 	}
@@ -181,7 +208,10 @@ func TestLoopAndContextBudgetTerminateDeterministically(t *testing.T) {
 	defer tinyStore.Close()
 	tiny.TaskID = "tiny"
 	tiny.ContextWindow = 8
-	budgeted := tinyRuntime.Run(context.Background(), tiny, tinyAuth)
+	budgeted, err := tinyRuntime.Run(context.Background(), tiny, tinyAuth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if budgeted.Status != TaskFailed || budgeted.FailureCategory != "CONTEXT" {
 		t.Fatalf("budget=%+v", budgeted)
 	}
@@ -193,7 +223,10 @@ func TestEventTamperingAndOptimisticConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer env.Store.Close()
-	result := env.Run(context.Background())
+	result, err := env.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if _, err := env.Store.(*SQLiteStore).db.Exec(`UPDATE harness_events SET payload_json='{"tampered":true}' WHERE task_id=? AND sequence=2`, result.TaskID); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +242,10 @@ func TestEventTamperingAndOptimisticConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateResult := stateEnv.Run(context.Background())
+	stateResult, err := stateEnv.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if _, err := stateStore.db.Exec(`UPDATE harness_tasks SET state_json='{"task_id":"state-tamper","goal":"rewritten","status":"COMPLETED"}' WHERE task_id=?`, stateResult.TaskID); err != nil {
 		t.Fatal(err)
 	}

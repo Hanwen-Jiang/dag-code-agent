@@ -60,12 +60,15 @@ func main() {
 	defer func() { _ = runtime.Close() }()
 
 	auth := harness.AuthContext{TenantID: "acme", SubjectID: "service", Scopes: []string{"memory:read"}}
-	result := runtime.Run(context.Background(), harness.TaskRequest{
+	result, runErr := runtime.Run(context.Background(), harness.TaskRequest{
 		TaskID:    "example-custom-model",
 		Goal:      "return a structured summary",
 		TenantID:  auth.TenantID,
 		SubjectID: auth.SubjectID,
 	}, auth)
+	if runErr != nil {
+		log.Fatalf("Run: %v", runErr)
+	}
 
 	fmt.Printf("status=%s answer=%s\n", result.Status, result.FinalAnswer)
 

@@ -200,7 +200,16 @@ func (r *HarnessNodeRunner) Run(ctx context.Context, nodeCtx NodeExecutionContex
 		return NodeExecutionResult{Status: "FAILED", ErrorCode: "NO_RUNTIME"}, nil
 	}
 	request := h.TaskRequest{TaskID: "dag:" + nodeCtx.RunID + ":" + nodeCtx.Node.NodeID + ":" + nodeCtx.AttemptID, Goal: nodeCtx.Node.Objective, TenantID: r.Auth.TenantID, SubjectID: r.Auth.SubjectID, MaxSteps: 8, ContextWindow: 4096, Constraints: nodeCtx.ExactConstraints}
-	result := r.Runtime.Run(ctx, request, r.Auth)
+	result, runErr := r.Runtime.Run(ctx, request, r.Auth)
+	if runErr != nil {
+		// A control-plane failure is operational, not a node verdict, so it
+		// must not be recorded as one.
+		code := "HARNESS_INFRASTRUCTURE"
+		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+			code = "HARNESS_CONTEXT"
+		}
+		return NodeExecutionResult{Status: "FAILED", ErrorCode: code, ErrorMessage: runErr.Error()}, nil
+	}
 	if result.Status != h.TaskCompleted {
 		return NodeExecutionResult{Status: "FAILED", ErrorCode: result.FailureCategory, ErrorMessage: result.State.LastErrorString()}, nil
 	}

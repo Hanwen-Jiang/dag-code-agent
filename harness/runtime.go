@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -146,7 +147,68 @@ func modelResponsePayload(response ModelResponse) map[string]any {
 	}
 }
 
-func (r *Runtime) Run(ctx context.Context, request TaskRequest, auth AuthContext) RunResult {
+// failureCategoryStore marks a failure caused by the control plane's own
+// storage rather than by the task or the model.
+const failureCategoryStore = "STORE"
+
+// ErrInfrastructure reports a failure of the control plane itself (store or
+// journal) rather than an outcome of the task. Callers should surface it as an
+// operational error, not as "the agent gave up".
+var ErrInfrastructure = errors.New("infrastructure failure")
+
+// finish pairs a run result with the error a Go caller expects.
+//
+// The rule is deliberate (see the embeddability design, §5.4):
+//
+//   - a completed task, or a task that failed on its own merits (model output
+//     rejected, budget exhausted, verification failed), returns (result, nil);
+//     callers inspect result.Status and result.FailureCategory.
+//   - a cancelled or timed-out context returns (result, ctx.Err()) so callers
+//     can observe context.Canceled / context.DeadlineExceeded.
+//   - a store/journal failure returns (result, ErrInfrastructure-wrapped err).
+func (r *Runtime) finish(ctx context.Context, result RunResult) (RunResult, error) {
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if result.FailureCategory == failureCategoryStore {
+		detail := ""
+		if message, ok := result.State.LastError["message"].(string); ok {
+			detail = message
+		}
+		if code, ok := result.State.LastError["code"].(string); ok && detail == "" {
+			detail = code
+		}
+		if detail == "" {
+			detail = "control-plane store failure"
+		}
+		return result, fmt.Errorf("%w: %s", ErrInfrastructure, detail)
+	}
+	return result, nil
+}
+
+// Run executes a task to completion (or to a gate/failure) and returns the
+// durable result. Calling it with an existing task id resumes that task
+// instead of starting over.
+func (r *Runtime) Run(ctx context.Context, request TaskRequest, auth AuthContext) (RunResult, error) {
+	return r.finish(ctx, r.run(ctx, request, auth))
+}
+
+// Resume answers an open user gate.
+func (r *Runtime) Resume(ctx context.Context, taskID, userMessage string, auth AuthContext) (RunResult, error) {
+	return r.finish(ctx, r.resume(ctx, taskID, userMessage, auth))
+}
+
+// SendMessage appends a user message to an existing task and continues it.
+func (r *Runtime) SendMessage(ctx context.Context, taskID, userMessage string, auth AuthContext) (RunResult, error) {
+	return r.finish(ctx, r.sendMessage(ctx, taskID, userMessage, auth))
+}
+
+// Cancel marks a task cancelled and durably records the request.
+func (r *Runtime) Cancel(taskID string, auth AuthContext) (RunResult, error) {
+	return r.finish(context.Background(), r.cancel(taskID, auth))
+}
+
+func (r *Runtime) run(ctx context.Context, request TaskRequest, auth AuthContext) RunResult {
 	request = request.WithDefaults()
 	if err := validateIdentity(request, auth); err != nil {
 		return failedResult(request, err)
@@ -452,7 +514,7 @@ func (r *Runtime) resultWithFailure(state TaskState, category string) RunResult 
 	return RunResult{TaskID: state.TaskID, Status: state.Status, State: state, FinalAnswer: state.FinalAnswer, FailureCategory: category, Events: events, Metrics: metrics}
 }
 
-func (r *Runtime) Resume(ctx context.Context, taskID, userMessage string, auth AuthContext) RunResult {
+func (r *Runtime) resume(ctx context.Context, taskID, userMessage string, auth AuthContext) RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, _, err := r.store.GetTask(taskID)
@@ -479,7 +541,7 @@ func (r *Runtime) Resume(ctx context.Context, taskID, userMessage string, auth A
 // SendMessage is the conversational session entrypoint. Unlike Resume, it
 // also permits a completed or failed task to start a fresh turn, so a client
 // can keep one session while iterating on a code change.
-func (r *Runtime) SendMessage(ctx context.Context, taskID, userMessage string, auth AuthContext) RunResult {
+func (r *Runtime) sendMessage(ctx context.Context, taskID, userMessage string, auth AuthContext) RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, _, err := r.store.GetTask(taskID)
@@ -504,7 +566,7 @@ func (r *Runtime) SendMessage(ctx context.Context, taskID, userMessage string, a
 	}
 	return r.continueRun(ctx, taskID, auth)
 }
-func (r *Runtime) Cancel(taskID string, auth AuthContext) RunResult {
+func (r *Runtime) cancel(taskID string, auth AuthContext) RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, _, err := r.store.GetTask(taskID)

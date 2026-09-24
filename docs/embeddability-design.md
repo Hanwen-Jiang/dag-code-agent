@@ -33,11 +33,15 @@
 2. `MemoryManager` 原实现直接锁具体结构体的私有 `mu`，这是真实的抽象破坏。改为在 `MemoryStore` 上新增
    `PutMemoryVersioned` 原子原语（与 `AppendEvent` 同构），版本判定留在核心、原子性下沉到后端。
 
-**尚未交付**（不在 C1–C4 验收范围内）：
+**后端一致性验证结果**（`harness/storetest`，10 组检查）：
 
-- §5.4 的执行入口签名变更（`Run` 返回 `(RunResult, error)`）。这是破坏性变更，需在打 tag 前完成，
-  否则将变成 major 版本变更。
-- §6.3 的 Postgres 后端只做到「编译 + 可用一致性套件验证」，未接 CI 的真实数据库。
+| 后端 | 结果 |
+|---|---|
+| `harness.NewSQLiteStore` | ✅ 10/10 通过 |
+| `harness.NewInMemoryStore` | ✅ 10/10 通过（修复过程中它曾漏包 `ErrStoreConflict`，套件当场抓到） |
+| `backends/postgres` | ✅ 10/10 通过，**在真实 PostgreSQL 17 上实测**；另加 3 个并发用例（过期前置条件并发追加、并发 commit 保持日志连续、并发 `PutMemoryVersioned`）全通过 |
+
+**剩余事项**：无阻断项。`Run` 签名已按 §5.4 落地为 `(RunResult, error)`（见该节）。
 
 ---
 
@@ -267,9 +271,9 @@ func SteppedClock(t time.Time, d time.Duration) Clock  // 可推进
 1. `NewChatModelFromEnv()` / `DescribeModelProvider()` **移出核心**，搬到 `cmd/` 或独立的 `harness/modelenv` 包
 2. 核心提供 `EchoModel`（确定性离线模型）作为默认，保证零依赖可跑
 
-### 5.4 执行入口签名（需决策）
+### 5.4 执行入口签名（已实施）
 
-实测的真实签名：
+改造前的真实签名：
 
 ```go
 // internal/harness/runtime.go:81
@@ -312,6 +316,22 @@ func (r *Runtime) Run(ctx context.Context, req TaskRequest, auth AuthContext) (R
 | Store / 内部错误 | `(res, err)` |
 
 > **兼容性提示**：这是**破坏性变更**。旧签名的两个方法（`Run`、`ContinueRun` 系列）应在 Phase 1 一起改，因为此时还在 `internal/` 内，外部无感知。**错过 Phase 1 再改就要走 major 版本**。
+
+**实施结果**：已落地。`Run` / `Resume` / `SendMessage` / `Cancel` 全部返回 `(RunResult, error)`，判定逻辑集中在
+`Runtime.finish`（`harness/runtime.go`），并新增哨兵 `harness.ErrInfrastructure` 区分「控制面故障」与「任务未成功」。
+新签名按约定把「模型不合格/预算耗尽/验证失败」保留在 `res.Status`（`(res, nil)`），不污染 error。
+
+`httpapi` 侧随之新增 `writeRunError` 映射：
+
+| 情况 | HTTP 状态 |
+|---|---|
+| 任务未成功（业务结果） | 原状态码 + `Status=FAILED` 载荷 |
+| `context.Canceled` | 408 `RUN_CANCELLED` |
+| `context.DeadlineExceeded` | 504 `RUN_DEADLINE_EXCEEDED` |
+| `ErrInfrastructure` | 503 `CONTROL_PLANE_UNAVAILABLE` |
+
+`harness/dag` 的 `HarnessNodeRunner` 也据此区分：控制面故障记为 `HARNESS_INFRASTRUCTURE`（可重试），
+不再被误记成节点裁决。
 
 ---
 

@@ -36,12 +36,15 @@ func main() {
 	defer func() { _ = store.Close() }()
 
 	auth := harness.AuthContext{TenantID: "external", SubjectID: "consumer", Scopes: []string{"memory:read"}}
-	result := runtime.Run(context.Background(), harness.TaskRequest{
+	result, runErr := runtime.Run(context.Background(), harness.TaskRequest{
 		TaskID:    "external-consumer-1",
 		Goal:      "prove the control plane is importable from another module",
 		TenantID:  auth.TenantID,
 		SubjectID: auth.SubjectID,
 	}, auth)
+	if runErr != nil {
+		log.Fatalf("Run: %v", runErr)
+	}
 
 	fmt.Printf("module: example.com/external-consumer\n")
 	fmt.Printf("status: %s\n", result.Status)

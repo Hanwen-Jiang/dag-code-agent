@@ -51,12 +51,15 @@ func main() {
 	defer func() { _ = store.Close() }()
 
 	auth := harness.AuthContext{TenantID: "acme", SubjectID: "service", Scopes: []string{"memory:read"}}
-	result := runtime.Run(context.Background(), harness.TaskRequest{
+	result, runErr := runtime.Run(context.Background(), harness.TaskRequest{
 		TaskID:    "example-custom-store",
 		Goal:      "verify the injected store receives every durable write",
 		TenantID:  auth.TenantID,
 		SubjectID: auth.SubjectID,
 	}, auth)
+	if runErr != nil {
+		log.Fatalf("Run: %v", runErr)
+	}
 
 	if _, err := runtime.Journal().ReplayState(result.TaskID); err != nil {
 		log.Fatalf("ReplayState through the custom store: %v", err)

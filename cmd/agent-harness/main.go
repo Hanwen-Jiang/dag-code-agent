@@ -40,7 +40,10 @@ func main() {
 			log.Fatal(err)
 		}
 		defer func() { _ = environment.Store.Close() }()
-		result := environment.Run(context.Background())
+		result, runErr := environment.Run(context.Background())
+		if runErr != nil {
+			log.Fatalf("run: %v", runErr)
+		}
 		encoded, _ := json.MarshalIndent(map[string]any{
 			"status": result.Status, "task_id": result.TaskID,
 			"final_answer": result.FinalAnswer, "metrics": result.Metrics,

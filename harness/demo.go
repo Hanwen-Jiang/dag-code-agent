@@ -141,7 +141,7 @@ func BuildDemoEnvironmentWithStore(store Store, request TaskRequest, auth AuthCo
 func demoResponseSchema() map[string]any {
 	return map[string]any{"type": "object", "required": []string{"status", "artifact_id", "verified"}, "properties": map[string]any{"status": map[string]any{"type": "string"}, "artifact_id": map[string]any{"type": "string"}, "verified": map[string]any{"type": "boolean"}}, "additionalProperties": false}
 }
-func (e *DemoEnvironment) Run(ctx context.Context) RunResult {
+func (e *DemoEnvironment) Run(ctx context.Context) (RunResult, error) {
 	return e.Runtime.Run(ctx, e.Request, e.Auth)
 }
 

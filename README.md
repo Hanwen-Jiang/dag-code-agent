@@ -299,8 +299,8 @@ func TestMyStore(t *testing.T) {
 ```
 
 现成后端：`harness.NewSQLiteStore(path)`（默认，纯 Go 无 CGO）、
-`harness.NewInMemoryStore()`（零依赖）、`backends/postgres`（可选）。
-两者都通过全部 10 组一致性检查。
+`harness.NewInMemoryStore()`（零依赖）、`backends/postgres`（可选，基于 pgx）。
+三者都通过全部 10 组一致性检查（Postgres 已在真实 PostgreSQL 17 上实测）。
 
 可运行示例见 `examples/`：`embed_offline`、`embed_custom_store`、`embed_custom_model`，
 以及独立 module 形式的 `examples/embed_external`。
