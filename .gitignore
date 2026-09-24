@@ -8,3 +8,4 @@ frontend/node_modules/
 /orchestrator
 *.test
 .DS_Store
+examples/embed_external/external-consumer
