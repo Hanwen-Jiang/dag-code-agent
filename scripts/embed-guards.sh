@@ -66,6 +66,10 @@ echo "== G6: the conformance suite passes for every backend (abstraction) =="
 guard "storetest passes for SQLiteStore and InMemoryStore" go test ./harness/storetest/
 
 echo
+echo "== G6b: strategy conformance suite =="
+guard "looptest passes for the built-in and a custom topology" go test ./harness/looptest/
+
+echo
 echo "== G7: dependency budget (regression guard) =="
 # Design 9.2: at most 4 direct third-party dependencies in the core (currently
 # 2: jsonschema + modernc.org/sqlite). A new heavy import must be a deliberate

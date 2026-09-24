@@ -34,6 +34,7 @@ type runtimeConfig struct {
 	strategies     *StrategyRegistry
 	strategy       Strategy
 	strategyName   string
+	newID          func(string) string
 }
 
 // WithStore injects the persistence backend. Without it, New creates a
@@ -193,6 +194,20 @@ func WithStrategyInstance(strategy Strategy) Option {
 	}
 }
 
+// WithIDSource replaces the generator used for identifiers created during a
+// run (turn ids today, and any id an extension asks for). The default is
+// crypto-random, which makes two runs of the same task differ; supplying a
+// deterministic source is what lets a test assert a byte-identical journal.
+func WithIDSource(newID func(prefix string) string) Option {
+	return func(c *runtimeConfig) error {
+		if newID == nil {
+			return errors.New("harness: WithIDSource requires a non-nil generator")
+		}
+		c.newID = newID
+		return nil
+	}
+}
+
 // WithLogger sets the structured logger used for lifecycle diagnostics.
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *runtimeConfig) error {
@@ -309,6 +324,9 @@ func New(opts ...Option) (*Runtime, error) {
 	if cfg.logger == nil {
 		cfg.logger = slog.Default()
 	}
+	if cfg.newID == nil {
+		cfg.newID = NewID
+	}
 	if cfg.strategies == nil {
 		cfg.strategies = NewStrategyRegistry(ReActStrategy{})
 	}
@@ -350,6 +368,7 @@ func New(opts ...Option) (*Runtime, error) {
 		ownsStore:      cfg.ownsStore,
 		strategies:     cfg.strategies,
 		strategy:       cfg.strategy,
+		newID:          cfg.newID,
 		loopSeen:       map[string]map[string]int{},
 	}, nil
 }

@@ -31,6 +31,47 @@ import (
 //	R4 No privilege escalation. Tool calls are proposed through
 //	   ActionCallTools and still pass Authorizer, HookBus and the budget.
 
+// knownEventTypes is the vocabulary every loop topology shares.
+//
+// Replay, the UAT gate, DAG nodes and XAI attribution all rely on these names,
+// so a strategy cannot introduce a new event by accident. Extending this list
+// is a deliberate, reviewable change.
+var knownEventTypes = []string{
+	"TASK_ACCEPTED",
+	"PLAN_COMPILED",
+	"TURN_STARTED",
+	"STEP_STARTED",
+	"CONTEXT_COMPILED",
+	"MODEL_REQUESTED",
+	"MODEL_PROPOSED",
+	"TOOL_INVOKED",
+	"TOOL_OBSERVED",
+	"TOOLS_EXECUTED",
+	"SUBAGENTS_REQUESTED",
+	"VERIFIER_REJECTED",
+	"STEP_COMPLETED",
+	"USER_GATE_OPENED",
+	"TURN_COMPLETED",
+	"TASK_COMPLETED",
+	"TASK_CANCELLED",
+	"TASK_FAILED",
+	"USER_GATE_RESUMED",
+	"USER_MESSAGE_RECEIVED",
+}
+
+// KnownEventTypes returns the shared event vocabulary.
+func KnownEventTypes() []string { return append([]string{}, knownEventTypes...) }
+
+// IsKnownEventType reports whether a type belongs to the shared vocabulary.
+func IsKnownEventType(eventType string) bool {
+	for _, known := range knownEventTypes {
+		if known == eventType {
+			return true
+		}
+	}
+	return false
+}
+
 // ActionKind enumerates what the kernel can be asked to do.
 type ActionKind string
 

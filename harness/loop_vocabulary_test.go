@@ -6,34 +6,9 @@ import (
 	"testing"
 )
 
-// eventVocabulary is the set of event types the kernel may publish.
-//
-// Every loop topology shares this vocabulary, which is what lets replay, the
-// UAT gate, DAG nodes and XAI attribution work unchanged when the topology
-// changes. A strategy that needs a new event must add it here deliberately:
-// the point of this test is that it cannot happen by accident.
-var eventVocabulary = map[string]bool{
-	"TASK_ACCEPTED":         true,
-	"PLAN_COMPILED":         true,
-	"TURN_STARTED":          true,
-	"STEP_STARTED":          true,
-	"CONTEXT_COMPILED":      true,
-	"MODEL_REQUESTED":       true,
-	"MODEL_PROPOSED":        true,
-	"TOOL_INVOKED":          true,
-	"TOOL_OBSERVED":         true,
-	"TOOLS_EXECUTED":        true,
-	"SUBAGENTS_REQUESTED":   true,
-	"VERIFIER_REJECTED":     true,
-	"STEP_COMPLETED":        true,
-	"USER_GATE_OPENED":      true,
-	"TURN_COMPLETED":        true,
-	"TASK_COMPLETED":        true,
-	"TASK_CANCELLED":        true,
-	"TASK_FAILED":           true,
-	"USER_GATE_RESUMED":     true,
-	"USER_MESSAGE_RECEIVED": true,
-}
+// The vocabulary itself lives in the core (see knownEventTypes in loop.go) so
+// that strategies, tests and any future tooling share one source of truth.
+// These tests assert the kernel stays inside it.
 
 func eventTypes(t *testing.T, runtime *Runtime, taskID string) []string {
 	t.Helper()
@@ -43,7 +18,7 @@ func eventTypes(t *testing.T, runtime *Runtime, taskID string) []string {
 	}
 	types := make([]string, 0, len(events))
 	for _, event := range events {
-		if !eventVocabulary[event.Type] {
+		if !IsKnownEventType(event.Type) {
 			t.Fatalf("event %q is outside the shared vocabulary: a new topology must extend eventVocabulary deliberately", event.Type)
 		}
 		types = append(types, event.Type)

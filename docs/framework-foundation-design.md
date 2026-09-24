@@ -492,7 +492,28 @@ func WithIDSource(ids IDSource) Option
 
 没有这一条，用户升级策略后，**所有历史任务的重放都会用新语义跑旧轨迹**——这是静默的数据完整性问题，比崩溃更糟。
 
-#### 4.5.5 可执行契约：`harness/looptest`
+#### 4.5.5 可执行契约：`harness/looptest`（已交付）
+
+> **交付状态**：§4.5 全部落地（提交 `604f752`、`192a9e4`、本提交）。
+> 内核实现在 `harness/loop_kernel.go`，`continueRun` 已改为「策略决策 → 内核执行」。
+>
+> **实施中发现的两处设计修正**（原设计稿有误）：
+>
+> 1. **确定性检查需要可注入的 ID 源**。原稿承诺「跑两次 → journal 逐字节相同」，但 `NewID` 用的是
+>    `crypto/rand`，`TURN_STARTED` 的 `turn_id` 每次都不同，逐字节相同**不可能达成**。因此新增
+>    `WithIDSource`（默认仍为 crypto 随机）；测试注入计数器实现，确定性检查才真正成立。
+>    **没有这一步，那条断言只能是空转的。**
+> 2. **身份拒绝只对「可续跑」任务成立**。任务已 COMPLETED/FAILED/CANCELLED 时 `Resume` 会短路返回
+>    记录结果、**根本不再咨询策略**，因此不存在重放风险，也无从拒绝。一致性套件因此断言
+>    「身份被记录 + 升级后历史仍可验证」，并**仅在任务可续跑时**断言拒绝；门控场景的拒绝由
+>    `harness/loop_vocabulary_test.go` 专项覆盖（那里能确定性地构造出停在 user gate 的任务）。
+>
+> **另一处必须写死的保真约束**（内核化时踩到）：工具执行**必须留在模型 step 内**。若把
+> 「执行模型刚提出的工具」拆成独立 step，会多出一个 `STEP_STARTED`，而每个 `STEP_COMPLETED`
+> 内嵌其所物化状态的 digest —— 于是**之后每个事件哈希都变**。同理，终态分支（gate/finish）
+> 必须自己提交 `STEP_COMPLETED`，且在该分支的状态变更**之后**提交。
+> `TestReActEventVocabularyAndOrdering` 断言一次脚本化工具调用的**精确 18 事件序列**，就是这条的守卫。
+
 
 对照 `harness/storetest` 的成熟做法，自定义策略必须能自证：
 
@@ -504,15 +525,18 @@ func RunStrategyConformance(t *testing.T, newStrategy func() harness.Strategy)
 
 检查项：
 
+已交付 8 项检查（`RunStrategyConformance`，对内置与自定义拓扑各跑一遍，共 16 项子测试）：
+
 | 检查 | 断言 |
 |---|---|
-| 事件词汇 | 运行中不产生未知事件类型 |
-| **确定性** | 同一脚本模型跑两次 → journal **逐字节相同**（含 `event_hash`） |
-| 有界性 | 给定 `MaxSteps` 必然终止 |
-| 预算 | 超预算以 `BUDGET` 结束，而非 panic 或死循环 |
-| 工具策略 | 越权工具被拒后策略仍能收敛到终态 |
-| `Scratch` 持久化 | 进程重启续跑后，策略看到相同的 `Scratch` |
-| **版本重放** | 注册表里升级策略版本后，旧任务仍能用**记录的旧版本**成功 `ReplayState` |
+| `Vocabulary` | 运行中不产生未知事件类型 |
+| **`Determinism`** | 同一脚本模型跑两次 → journal **逐字节相同**（type + payload + `event_hash`） |
+| `Bounded` | 模型永不给终答时，仍必在 `MaxSteps` 内终止 |
+| `JournalIntegrity` | `ReplayState` 通过；任务 id 不变 |
+| `IdentityIsRecordedAndPinned` | `TURN_STARTED` 记录 `{name, version}`；升级后旧 journal 仍验证；**可续跑时**换版本续跑被拒 |
+| `ScratchSurvivesResume` | 续跑后策略私有状态可继续观察 |
+| `ToolPolicyIsNotBypassed` | 未注册工具被拒并记为 observation，运行仍收敛到终态 |
+| `BudgetCannotHang` | 预算耗尽必须终止，不得 panic 或死循环 |
 
 第 2 项与第 7 项是这套机制的价值所在：它们把"自定义策略不会破坏重放"从承诺变成**用户自己就能跑的测试**。
 

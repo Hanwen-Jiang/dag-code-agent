@@ -62,6 +62,9 @@ type Runtime struct {
 	// names resolve against.
 	strategy   Strategy
 	strategies *StrategyRegistry
+	// newID generates identifiers created during a run; injectable so a
+	// deterministic test can assert a byte-identical journal.
+	newID func(string) string
 
 	mu       sync.Mutex
 	loopSeen map[string]map[string]int
@@ -87,6 +90,14 @@ func (r *Runtime) Memory() *MemoryManager { return r.memory }
 
 // Clock returns the time source used by this runtime.
 func (r *Runtime) Clock() Clock { return r.clock }
+
+// id creates an identifier with the configured generator.
+func (r *Runtime) id(prefix string) string {
+	if r.newID == nil {
+		return NewID(prefix)
+	}
+	return r.newID(prefix)
+}
 
 // Strategy returns the loop topology this runtime runs.
 func (r *Runtime) Strategy() Strategy { return r.strategy }
@@ -327,7 +338,7 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 	}
 	state.Status = TaskRunning
 	state.Turns++
-	state.CurrentTurnID = NewID("TURN")
+	state.CurrentTurnID = r.id("TURN")
 	if err := r.commitEvent(&state, "TURN_STARTED", map[string]any{
 		"turn_id":  state.CurrentTurnID,
 		"turn":     state.Turns,
