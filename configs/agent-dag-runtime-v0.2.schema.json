@@ -1,0 +1,1439 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/agent-dag-runtime-v0.2.schema.json",
+  "title": "Agent DAG Runtime Contract v0.2",
+  "description": "Canonical machine manifest for an append-only, human-gated multi-agent DAG runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "spec_hash",
+    "plan",
+    "nodes",
+    "edges",
+    "attempts",
+    "artifacts",
+    "evidence",
+    "events",
+    "graph_patches",
+    "hub_epochs",
+    "control_snapshots",
+    "uac_specs",
+    "context_packets",
+    "exit_packets",
+    "recovery_packets"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.2" },
+    "manifest_id": { "$ref": "#/$defs/Identifier" },
+    "spec_hash": { "$ref": "#/$defs/Digest" },
+    "plan": { "$ref": "#/$defs/Plan" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Node" }
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Edge" }
+    },
+    "attempts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Attempt" }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Artifact" }
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Evidence" }
+    },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Event" }
+    },
+    "graph_patches": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/GraphPatch" }
+    },
+    "hub_epochs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/HubEpoch" }
+    },
+    "control_snapshots": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ControlSnapshot" }
+    },
+    "uac_specs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/UAC" }
+    },
+    "context_packets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ContextPacket" }
+    },
+    "exit_packets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ExitPacket" }
+    },
+    "recovery_packets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/RecoveryPacket" }
+    }
+  },
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[A-Z][A-Z0-9._:-]*$"
+    },
+    "Digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "StringList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "IdList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Identifier" },
+      "uniqueItems": true
+    },
+    "Actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor_type", "actor_id"],
+      "properties": {
+        "actor_type": {
+          "enum": [
+            "LLM_AGENT",
+            "USER",
+            "SCHEDULER",
+            "POLICY_ENGINE",
+            "WORKER",
+            "SYSTEM"
+          ]
+        },
+        "actor_id": { "$ref": "#/$defs/Identifier" },
+        "role": { "type": "string", "minLength": 1 },
+        "epoch_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/Identifier" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "Requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirement_id",
+        "title",
+        "statement",
+        "priority",
+        "acceptance_criterion_ids"
+      ],
+      "properties": {
+        "requirement_id": { "$ref": "#/$defs/Identifier" },
+        "title": { "type": "string", "minLength": 1 },
+        "statement": { "type": "string", "minLength": 1 },
+        "priority": { "enum": ["MUST", "SHOULD", "COULD"] },
+        "acceptance_criterion_ids": { "$ref": "#/$defs/IdList" }
+      }
+    },
+    "Approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "spec_hash",
+        "decision_id",
+        "approved_by",
+        "approved_at"
+      ],
+      "properties": {
+        "status": { "enum": ["PENDING", "APPROVED", "REJECTED"] },
+        "spec_hash": {
+          "oneOf": [
+            { "$ref": "#/$defs/Digest" },
+            { "type": "null" }
+          ]
+        },
+        "decision_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/Identifier" },
+            { "type": "null" }
+          ]
+        },
+        "approved_by": {
+          "oneOf": [
+            { "$ref": "#/$defs/Actor" },
+            { "type": "null" }
+          ]
+        },
+        "approved_at": {
+          "oneOf": [
+            { "$ref": "#/$defs/Timestamp" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "APPROVED" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "spec_hash": { "$ref": "#/$defs/Digest" },
+              "decision_id": { "$ref": "#/$defs/Identifier" },
+              "approved_by": { "$ref": "#/$defs/Actor" },
+              "approved_at": { "$ref": "#/$defs/Timestamp" }
+            }
+          }
+        }
+      ]
+    },
+    "HubPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blind_first_pass",
+        "max_challenge_rounds",
+        "max_decisions_per_epoch",
+        "max_input_tokens_per_epoch",
+        "max_wall_time_seconds",
+        "rotate_on_context_compaction"
+      ],
+      "properties": {
+        "blind_first_pass": { "const": true },
+        "max_challenge_rounds": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "max_decisions_per_epoch": { "type": "integer", "minimum": 1 },
+        "max_input_tokens_per_epoch": { "type": "integer", "minimum": 1024 },
+        "max_wall_time_seconds": { "type": "integer", "minimum": 30 },
+        "rotate_on_context_compaction": { "const": true }
+      }
+    },
+    "HubEpoch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "epoch_id",
+        "plan_id",
+        "predecessor_epoch_id",
+        "status",
+        "progress_hub",
+        "skeptic_hub",
+        "started_at",
+        "ended_at",
+        "end_reason",
+        "successor_epoch_id"
+      ],
+      "properties": {
+        "epoch_id": { "$ref": "#/$defs/Identifier" },
+        "plan_id": { "$ref": "#/$defs/Identifier" },
+        "predecessor_epoch_id": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        },
+        "status": { "enum": ["ACTIVE", "ROTATED", "CLOSED"] },
+        "progress_hub": { "$ref": "#/$defs/Actor" },
+        "skeptic_hub": { "$ref": "#/$defs/Actor" },
+        "started_at": { "$ref": "#/$defs/Timestamp" },
+        "ended_at": {
+          "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }]
+        },
+        "end_reason": {
+          "oneOf": [
+            {
+              "enum": [
+                "CONTEXT_COMPACTION",
+                "TOKEN_BUDGET",
+                "DECISION_BUDGET",
+                "WALL_TIME",
+                "MANUAL_ROTATION",
+                "EPOCH_COMPLETE"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "successor_epoch_id": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "ACTIVE" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "ended_at": { "type": "null" },
+              "end_reason": { "type": "null" },
+              "successor_epoch_id": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "ROTATED" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "ended_at": { "$ref": "#/$defs/Timestamp" },
+              "end_reason": {
+                "enum": [
+                  "CONTEXT_COMPACTION",
+                  "TOKEN_BUDGET",
+                  "DECISION_BUDGET",
+                  "WALL_TIME",
+                  "MANUAL_ROTATION"
+                ]
+              },
+              "successor_epoch_id": { "$ref": "#/$defs/Identifier" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "CLOSED" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "ended_at": { "$ref": "#/$defs/Timestamp" },
+              "end_reason": { "const": "EPOCH_COMPLETE" },
+              "successor_epoch_id": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "ConcurrencyPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_parallel_attempts",
+        "lease_seconds",
+        "write_conflict_policy",
+        "optimistic_concurrency"
+      ],
+      "properties": {
+        "max_parallel_attempts": { "type": "integer", "minimum": 1 },
+        "lease_seconds": { "type": "integer", "minimum": 10 },
+        "write_conflict_policy": { "enum": ["SERIALIZE", "ISOLATE_WORKTREE", "REJECT"] },
+        "optimistic_concurrency": { "const": true }
+      }
+    },
+    "Plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "revision",
+        "parent_revision",
+        "title",
+        "objective",
+        "status",
+        "created_at",
+        "created_by",
+        "requirements",
+        "constraints",
+        "flags",
+        "approval",
+        "hub_policy",
+        "concurrency_policy"
+      ],
+      "properties": {
+        "plan_id": { "$ref": "#/$defs/Identifier" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "parent_revision": {
+          "oneOf": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "null" }
+          ]
+        },
+        "title": { "type": "string", "minLength": 1 },
+        "objective": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": [
+            "DRAFT",
+            "IN_REVIEW",
+            "REVISION_REQUESTED",
+            "APPROVED",
+            "READY",
+            "RUNNING",
+            "PAUSED",
+            "COMPLETED",
+            "FAILED",
+            "SUPERSEDED",
+            "CANCELLED"
+          ]
+        },
+        "created_at": { "$ref": "#/$defs/Timestamp" },
+        "created_by": { "$ref": "#/$defs/Actor" },
+        "requirements": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/Requirement" }
+        },
+        "constraints": { "$ref": "#/$defs/StringList" },
+        "flags": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" }
+        },
+        "approval": { "$ref": "#/$defs/Approval" },
+        "hub_policy": { "$ref": "#/$defs/HubPolicy" },
+        "concurrency_policy": { "$ref": "#/$defs/ConcurrencyPolicy" }
+      }
+    },
+    "ArtifactContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_id",
+        "artifact_kind",
+        "media_type",
+        "required",
+        "delivery_mode",
+        "max_tokens",
+        "trust_class"
+      ],
+      "properties": {
+        "contract_id": { "$ref": "#/$defs/Identifier" },
+        "artifact_kind": { "type": "string", "minLength": 1 },
+        "media_type": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean" },
+        "delivery_mode": {
+          "enum": ["FULL", "SUMMARY", "EVIDENCE_ONLY", "METADATA_ONLY", "EXCLUDED"]
+        },
+        "max_tokens": { "type": "integer", "minimum": 0 },
+        "trust_class": { "enum": ["TRUSTED_CONTRACT", "VERIFIED_DATA", "UNTRUSTED_DATA"] }
+      }
+    },
+    "AcceptanceCriterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "criterion_id",
+        "requirement_ids",
+        "statement",
+        "oracle_type",
+        "pass_condition",
+        "evidence_required",
+        "verifier_role"
+      ],
+      "properties": {
+        "criterion_id": { "$ref": "#/$defs/Identifier" },
+        "requirement_ids": { "$ref": "#/$defs/IdList" },
+        "statement": { "type": "string", "minLength": 1 },
+        "oracle_type": {
+          "enum": [
+            "TEST",
+            "STATIC_ANALYSIS",
+            "USER_JUDGMENT",
+            "METRIC",
+            "MANUAL_INSPECTION",
+            "CONTRACT_CHECK"
+          ]
+        },
+        "pass_condition": { "type": "string", "minLength": 1 },
+        "evidence_required": { "$ref": "#/$defs/StringList" },
+        "verifier_role": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ContextPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fresh_agent_required",
+        "target_initial_input_ratio",
+        "hard_initial_input_ratio",
+        "checkpoint_threshold_ratio",
+        "preserve_exact",
+        "summarize",
+        "reference_only",
+        "exclude",
+        "on_overflow",
+        "prompt_injection_treatment"
+      ],
+      "properties": {
+        "fresh_agent_required": { "type": "boolean" },
+        "target_initial_input_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "hard_initial_input_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "checkpoint_threshold_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "preserve_exact": { "$ref": "#/$defs/StringList" },
+        "summarize": { "$ref": "#/$defs/StringList" },
+        "reference_only": { "$ref": "#/$defs/StringList" },
+        "exclude": { "$ref": "#/$defs/StringList" },
+        "on_overflow": { "enum": ["SPLIT_REQUIRED", "ROTATE_WITH_RECOVERY"] },
+        "prompt_injection_treatment": { "const": "DATA_ONLY" }
+      }
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_attempts",
+        "retryable_outcomes",
+        "backoff_seconds",
+        "fresh_agent_each_attempt",
+        "on_exhausted"
+      ],
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "retryable_outcomes": {
+          "type": "array",
+          "items": { "enum": ["FAILED", "TIMED_OUT", "ROTATED", "ABANDONED"] },
+          "uniqueItems": true
+        },
+        "backoff_seconds": { "type": "integer", "minimum": 0 },
+        "fresh_agent_each_attempt": { "const": true },
+        "on_exhausted": {
+          "enum": ["FAIL_NODE", "PROPOSE_DIAGNOSIS_PATCH", "ESCALATE_USER"]
+        }
+      }
+    },
+    "ExecutionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timeout_seconds",
+        "requires_lease",
+        "idempotency_scope",
+        "side_effect_class",
+        "retry_policy"
+      ],
+      "properties": {
+        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "requires_lease": { "const": true },
+        "idempotency_scope": { "type": "string", "minLength": 1 },
+        "side_effect_class": { "enum": ["NONE", "REVERSIBLE", "IRREVERSIBLE"] },
+        "retry_policy": { "$ref": "#/$defs/RetryPolicy" }
+      }
+    },
+    "ActivationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "on_unreachable"],
+      "properties": {
+        "mode": { "enum": ["ALL", "ANY", "QUORUM"] },
+        "quorum": { "type": "integer", "minimum": 1 },
+        "on_unreachable": { "enum": ["SKIP", "BLOCK", "FAIL"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mode": { "const": "QUORUM" } },
+            "required": ["mode"]
+          },
+          "then": { "required": ["quorum"] },
+          "else": { "not": { "required": ["quorum"] } }
+        }
+      ]
+    },
+    "GatePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "final_gate"],
+      "properties": {
+        "mode": { "enum": ["NONE", "AGENT", "USER", "JOINT", "USER_OPTIONAL", "POLICY"] },
+        "final_gate": {
+          "enum": ["NONE", "TECHNICAL_PASS", "USER_PASS", "BOTH_MUST_PASS", "EITHER_MAY_PASS"]
+        }
+      }
+    },
+    "WriteScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_paths", "forbidden_paths", "network_profile", "secret_profile"],
+      "properties": {
+        "allowed_paths": { "$ref": "#/$defs/StringList" },
+        "forbidden_paths": { "$ref": "#/$defs/StringList" },
+        "network_profile": { "type": "string", "minLength": 1 },
+        "secret_profile": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "introduced_in_revision",
+        "title",
+        "objective",
+        "work_type",
+        "executor_role",
+        "subgraph_id",
+        "risk_tier",
+        "requirement_ids",
+        "input_contracts",
+        "output_contracts",
+        "acceptance_criteria",
+        "activation",
+        "gate_policy",
+        "context_policy",
+        "execution_policy",
+        "tool_profile",
+        "write_scope"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/$defs/Identifier" },
+        "introduced_in_revision": { "type": "integer", "minimum": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "objective": { "type": "string", "minLength": 1 },
+        "work_type": {
+          "enum": [
+            "INTAKE",
+            "RESEARCH",
+            "DESIGN",
+            "IMPLEMENT",
+            "INTEGRATE",
+            "VERIFY",
+            "DIAGNOSIS",
+            "ENVIRONMENT",
+            "RELEASE"
+          ]
+        },
+        "executor_role": {
+          "enum": [
+            "ARCHITECT",
+            "RESEARCHER",
+            "DEVELOPER",
+            "VERIFIER",
+            "SENIOR_VERIFIER",
+            "UAT_FACILITATOR",
+            "USER",
+            "CHILD_HUB",
+            "DETERMINISTIC_SERVICE"
+          ]
+        },
+        "subgraph_id": { "$ref": "#/$defs/Identifier" },
+        "risk_tier": { "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+        "requirement_ids": { "$ref": "#/$defs/IdList" },
+        "input_contracts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ArtifactContract" }
+        },
+        "output_contracts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ArtifactContract" }
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/AcceptanceCriterion" }
+        },
+        "activation": { "$ref": "#/$defs/ActivationPolicy" },
+        "gate_policy": { "$ref": "#/$defs/GatePolicy" },
+        "context_policy": { "$ref": "#/$defs/ContextPolicy" },
+        "execution_policy": { "$ref": "#/$defs/ExecutionPolicy" },
+        "tool_profile": { "type": "string", "minLength": 1 },
+        "write_scope": { "$ref": "#/$defs/WriteScope" },
+        "superseded_by_node_id": { "$ref": "#/$defs/Identifier" }
+      }
+    },
+    "Predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "subject_id", "operator", "value"],
+      "properties": {
+        "source": {
+          "enum": [
+            "NODE_STATE",
+            "ATTEMPT_OUTCOME",
+            "ARTIFACT_PRESENT",
+            "EVIDENCE_VERDICT",
+            "USER_OUTCOME",
+            "PLAN_FLAG"
+          ]
+        },
+        "subject_id": { "$ref": "#/$defs/Identifier" },
+        "operator": { "enum": ["EQ", "NE", "IN", "NOT_IN", "EXISTS"] },
+        "value": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "boolean" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string" },
+              "uniqueItems": true
+            }
+          ]
+        }
+      }
+    },
+    "Condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["predicate"],
+          "properties": { "predicate": { "$ref": "#/$defs/Predicate" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["all"],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/Condition" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["any"],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/Condition" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["not"],
+          "properties": { "not": { "$ref": "#/$defs/Condition" } }
+        }
+      ]
+    },
+    "Edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edge_id",
+        "from_node",
+        "to_node",
+        "edge_type",
+        "gating",
+        "condition",
+        "artifact_contract_ids",
+        "description"
+      ],
+      "properties": {
+        "edge_id": { "$ref": "#/$defs/Identifier" },
+        "from_node": { "$ref": "#/$defs/Identifier" },
+        "to_node": { "$ref": "#/$defs/Identifier" },
+        "edge_type": { "enum": ["CONTROL", "ARTIFACT", "CONTEXT", "ASSURANCE"] },
+        "gating": { "type": "boolean" },
+        "condition": { "$ref": "#/$defs/Condition" },
+        "artifact_contract_ids": { "$ref": "#/$defs/IdList" },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease_id", "owner_id", "acquired_at", "expires_at", "expected_node_version"],
+      "properties": {
+        "lease_id": { "$ref": "#/$defs/Identifier" },
+        "owner_id": { "$ref": "#/$defs/Identifier" },
+        "acquired_at": { "$ref": "#/$defs/Timestamp" },
+        "expires_at": { "$ref": "#/$defs/Timestamp" },
+        "expected_node_version": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "fingerprint"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "fingerprint": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "node_id",
+        "ordinal",
+        "state",
+        "created_at",
+        "started_at",
+        "ended_at",
+        "agent_instance_id",
+        "context_packet_id",
+        "lease",
+        "outcome",
+        "exit_packet_id",
+        "recovery_packet_id",
+        "failure"
+      ],
+      "properties": {
+        "attempt_id": { "$ref": "#/$defs/Identifier" },
+        "node_id": { "$ref": "#/$defs/Identifier" },
+        "ordinal": { "type": "integer", "minimum": 1 },
+        "state": {
+          "enum": [
+            "CREATED",
+            "LEASED",
+            "RUNNING",
+            "WAITING_USER",
+            "SUCCEEDED",
+            "FAILED",
+            "BLOCKED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED",
+            "CANCELLED"
+          ]
+        },
+        "created_at": { "$ref": "#/$defs/Timestamp" },
+        "started_at": {
+          "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }]
+        },
+        "ended_at": {
+          "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }]
+        },
+        "agent_instance_id": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        },
+        "context_packet_id": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        },
+        "lease": {
+          "oneOf": [{ "$ref": "#/$defs/Lease" }, { "type": "null" }]
+        },
+        "outcome": {
+          "oneOf": [
+            { "enum": ["SUCCEEDED", "FAILED", "BLOCKED", "TIMED_OUT", "ROTATED", "ABANDONED", "CANCELLED"] },
+            { "type": "null" }
+          ]
+        },
+        "exit_packet_id": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        },
+        "recovery_packet_id": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        },
+        "failure": {
+          "oneOf": [{ "$ref": "#/$defs/Failure" }, { "type": "null" }]
+        }
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "contract_id",
+        "kind",
+        "uri",
+        "media_type",
+        "sha256",
+        "byte_size",
+        "producer_node_id",
+        "producer_attempt_id",
+        "source_snapshot",
+        "upstream_artifact_ids",
+        "trust_class",
+        "sensitivity",
+        "immutable",
+        "created_at"
+      ],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/Identifier" },
+        "contract_id": { "$ref": "#/$defs/Identifier" },
+        "kind": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "format": "uri" },
+        "media_type": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/Digest" },
+        "byte_size": { "type": "integer", "minimum": 0 },
+        "producer_node_id": { "$ref": "#/$defs/Identifier" },
+        "producer_attempt_id": { "$ref": "#/$defs/Identifier" },
+        "source_snapshot": { "$ref": "#/$defs/Digest" },
+        "upstream_artifact_ids": { "$ref": "#/$defs/IdList" },
+        "trust_class": { "enum": ["TRUSTED_CONTRACT", "VERIFIED_DATA", "UNTRUSTED_DATA"] },
+        "sensitivity": { "enum": ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "SECRET"] },
+        "immutable": { "const": true },
+        "created_at": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "criterion_id",
+        "requirement_ids",
+        "producer_attempt_id",
+        "artifact_ids",
+        "method",
+        "oracle",
+        "verdict",
+        "expected",
+        "observed",
+        "environment_digest",
+        "fresh_until",
+        "created_at"
+      ],
+      "properties": {
+        "evidence_id": { "$ref": "#/$defs/Identifier" },
+        "criterion_id": { "$ref": "#/$defs/Identifier" },
+        "requirement_ids": { "$ref": "#/$defs/IdList" },
+        "producer_attempt_id": { "$ref": "#/$defs/Identifier" },
+        "artifact_ids": { "$ref": "#/$defs/IdList" },
+        "method": { "type": "string", "minLength": 1 },
+        "oracle": { "type": "string", "minLength": 1 },
+        "verdict": { "enum": ["PASS", "FAIL", "INCONCLUSIVE", "NOT_RUN"] },
+        "expected": { "type": "string", "minLength": 1 },
+        "observed": { "type": "string", "minLength": 1 },
+        "environment_digest": { "$ref": "#/$defs/Digest" },
+        "fresh_until": { "$ref": "#/$defs/Timestamp" },
+        "created_at": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "Event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "sequence",
+        "timestamp",
+        "aggregate_type",
+        "aggregate_id",
+        "event_type",
+        "actor",
+        "expected_version",
+        "payload",
+        "correlation_id",
+        "causation_id",
+        "idempotency_key",
+        "spec_hash",
+        "prev_event_hash",
+        "event_hash"
+      ],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/Identifier" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "timestamp": { "$ref": "#/$defs/Timestamp" },
+        "aggregate_type": { "enum": ["PLAN", "NODE", "ATTEMPT", "PATCH", "UAC", "ARTIFACT", "EVIDENCE"] },
+        "aggregate_id": { "$ref": "#/$defs/Identifier" },
+        "event_type": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "actor": { "$ref": "#/$defs/Actor" },
+        "expected_version": { "type": "integer", "minimum": 0 },
+        "payload": { "type": "object" },
+        "correlation_id": { "$ref": "#/$defs/Identifier" },
+        "causation_id": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        },
+        "idempotency_key": { "type": "string", "minLength": 1 },
+        "spec_hash": { "$ref": "#/$defs/Digest" },
+        "prev_event_hash": {
+          "oneOf": [{ "$ref": "#/$defs/Digest" }, { "type": "null" }]
+        },
+        "event_hash": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "phase",
+        "round",
+        "actor",
+        "snapshot_id",
+        "snapshot_hash",
+        "visible_decision_ids",
+        "input_tokens",
+        "verdict",
+        "severity",
+        "reason",
+        "evidence_ids",
+        "created_at"
+      ],
+      "properties": {
+        "decision_id": { "$ref": "#/$defs/Identifier" },
+        "phase": { "enum": ["BLIND", "REBUTTAL", "AUTHORIZATION", "USER"] },
+        "round": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "actor": { "$ref": "#/$defs/Actor" },
+        "snapshot_id": { "$ref": "#/$defs/Identifier" },
+        "snapshot_hash": { "$ref": "#/$defs/Digest" },
+        "visible_decision_ids": { "$ref": "#/$defs/IdList" },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "verdict": { "enum": ["APPROVE", "REJECT", "CHALLENGE", "ABSTAIN"] },
+        "severity": { "enum": ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence_ids": { "$ref": "#/$defs/IdList" },
+        "created_at": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "Authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorization_id",
+        "mode",
+        "decisions",
+        "authorized_by",
+        "authorized_at"
+      ],
+      "properties": {
+        "authorization_id": { "$ref": "#/$defs/Identifier" },
+        "mode": { "enum": ["POLICY", "DUAL_HUB", "USER"] },
+        "decisions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/Decision" }
+        },
+        "authorized_by": { "$ref": "#/$defs/Actor" },
+        "authorized_at": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "AddNodeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "value"],
+      "properties": {
+        "op": { "const": "ADD_NODE" },
+        "value": { "$ref": "#/$defs/Node" }
+      }
+    },
+    "AddEdgeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "value"],
+      "properties": {
+        "op": { "const": "ADD_EDGE" },
+        "value": { "$ref": "#/$defs/Edge" }
+      }
+    },
+    "AddUACOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "value"],
+      "properties": {
+        "op": { "const": "ADD_UAC" },
+        "value": { "$ref": "#/$defs/UAC" }
+      }
+    },
+    "AddInputContractOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "target_node_id", "value"],
+      "properties": {
+        "op": { "const": "ADD_INPUT_CONTRACT" },
+        "target_node_id": { "$ref": "#/$defs/Identifier" },
+        "value": { "$ref": "#/$defs/ArtifactContract" }
+      }
+    },
+    "SupersedeNodeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "target_node_id", "replacement_node_id"],
+      "properties": {
+        "op": { "const": "SUPERSEDE_NODE" },
+        "target_node_id": { "$ref": "#/$defs/Identifier" },
+        "replacement_node_id": { "$ref": "#/$defs/Identifier" }
+      }
+    },
+    "SetPlanFlagOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "flag", "value"],
+      "properties": {
+        "op": { "const": "SET_PLAN_FLAG" },
+        "flag": { "type": "string", "minLength": 1 },
+        "value": { "type": "boolean" }
+      }
+    },
+    "AddRequirementOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "value"],
+      "properties": {
+        "op": { "const": "ADD_REQUIREMENT" },
+        "value": { "$ref": "#/$defs/Requirement" }
+      }
+    },
+    "ReplaceRequirementOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "requirement_id", "value"],
+      "properties": {
+        "op": { "const": "REPLACE_REQUIREMENT" },
+        "requirement_id": { "$ref": "#/$defs/Identifier" },
+        "value": { "$ref": "#/$defs/Requirement" }
+      }
+    },
+    "PatchOperation": {
+      "oneOf": [
+        { "$ref": "#/$defs/AddNodeOperation" },
+        { "$ref": "#/$defs/AddEdgeOperation" },
+        { "$ref": "#/$defs/AddUACOperation" },
+        { "$ref": "#/$defs/AddInputContractOperation" },
+        { "$ref": "#/$defs/SupersedeNodeOperation" },
+        { "$ref": "#/$defs/SetPlanFlagOperation" },
+        { "$ref": "#/$defs/AddRequirementOperation" },
+        { "$ref": "#/$defs/ReplaceRequirementOperation" }
+      ]
+    },
+    "GraphPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "patch_id",
+        "base_plan_id",
+        "base_revision",
+        "base_spec_hash",
+        "kind",
+        "materiality",
+        "reason",
+        "evidence_ids",
+        "proposed_by",
+        "proposed_at",
+        "operations",
+        "status",
+        "authorization"
+      ],
+      "properties": {
+        "patch_id": { "$ref": "#/$defs/Identifier" },
+        "base_plan_id": { "$ref": "#/$defs/Identifier" },
+        "base_revision": { "type": "integer", "minimum": 1 },
+        "base_spec_hash": { "$ref": "#/$defs/Digest" },
+        "kind": {
+          "enum": ["RECOVERY_PATH", "REPLAN", "USER_CHANGE", "REQUIREMENT_CHANGE", "CANCEL_BRANCH"]
+        },
+        "materiality": { "enum": ["AUTOMATIC", "DUAL_HUB", "USER"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence_ids": { "$ref": "#/$defs/IdList" },
+        "proposed_by": { "$ref": "#/$defs/Actor" },
+        "proposed_at": { "$ref": "#/$defs/Timestamp" },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/PatchOperation" }
+        },
+        "status": { "enum": ["PROPOSED", "APPROVED", "REJECTED", "APPLIED"] },
+        "authorization": { "$ref": "#/$defs/Authorization" },
+        "applied_revision": { "type": "integer", "minimum": 2 }
+      }
+    },
+    "DriverAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_type", "target", "timeout_seconds"],
+      "properties": {
+        "action_type": { "enum": ["COMMAND", "HTTP", "FILE", "BROWSER", "APP"] },
+        "target": { "type": "string", "minLength": 1 },
+        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "expected": { "type": "string" }
+      }
+    },
+    "UACScenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "title", "steps", "expected_result"],
+      "properties": {
+        "scenario_id": { "$ref": "#/$defs/Identifier" },
+        "title": { "type": "string", "minLength": 1 },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "expected_result": { "type": "string", "minLength": 1 }
+      }
+    },
+    "UAC": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uac_id",
+        "node_id",
+        "status",
+        "capsule_type",
+        "subject_contract_id",
+        "bound_artifact_id",
+        "bound_sha256",
+        "isolated",
+        "uses_production_data",
+        "ttl_minutes",
+        "launch",
+        "healthcheck",
+        "seed",
+        "reset",
+        "evidence_capture",
+        "cleanup",
+        "scenarios",
+        "allowed_outcomes",
+        "on_timeout"
+      ],
+      "properties": {
+        "uac_id": { "$ref": "#/$defs/Identifier" },
+        "node_id": { "$ref": "#/$defs/Identifier" },
+        "status": {
+          "enum": [
+            "SPECIFIED",
+            "PREPARING",
+            "READY",
+            "ACTIVE",
+            "PASSED",
+            "FAILED",
+            "CANNOT_TEST",
+            "UNSURE",
+            "DELEGATED",
+            "ENV_FAILED",
+            "EXPIRED",
+            "CLEANING",
+            "CLEANED",
+            "CANCELLED"
+          ]
+        },
+        "capsule_type": { "enum": ["WEB_PREVIEW", "CLI_SESSION", "API_PANEL", "DESKTOP_APP", "DOCUMENT_COMPARE", "MOBILE_SIMULATOR"] },
+        "subject_contract_id": { "$ref": "#/$defs/Identifier" },
+        "bound_artifact_id": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        },
+        "bound_sha256": {
+          "oneOf": [{ "$ref": "#/$defs/Digest" }, { "type": "null" }]
+        },
+        "isolated": { "const": true },
+        "uses_production_data": { "const": false },
+        "ttl_minutes": { "type": "integer", "minimum": 5 },
+        "launch": { "$ref": "#/$defs/DriverAction" },
+        "healthcheck": { "$ref": "#/$defs/DriverAction" },
+        "seed": { "$ref": "#/$defs/DriverAction" },
+        "reset": { "$ref": "#/$defs/DriverAction" },
+        "evidence_capture": { "$ref": "#/$defs/DriverAction" },
+        "cleanup": { "$ref": "#/$defs/DriverAction" },
+        "scenarios": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/UACScenario" }
+        },
+        "allowed_outcomes": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "enum": ["PASS", "PASS_WITH_FEEDBACK", "FAIL", "CANNOT_TEST", "UNSURE", "DELEGATE_TO_AGENT"]
+          },
+          "uniqueItems": true
+        },
+        "on_timeout": { "enum": ["KEEP_WAITING", "EXPIRE", "DELEGATE", "CANCEL"] }
+      }
+    },
+    "ContextBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context_window_tokens",
+        "stable_instruction_tokens",
+        "tool_schema_tokens",
+        "project_envelope_tokens",
+        "node_spec_tokens",
+        "artifact_pack_tokens",
+        "initial_input_tokens",
+        "tool_result_reserve_tokens",
+        "output_reserve_tokens",
+        "safety_margin_tokens",
+        "target_initial_input_ratio",
+        "hard_initial_input_ratio"
+      ],
+      "properties": {
+        "context_window_tokens": { "type": "integer", "minimum": 4096 },
+        "stable_instruction_tokens": { "type": "integer", "minimum": 0 },
+        "tool_schema_tokens": { "type": "integer", "minimum": 0 },
+        "project_envelope_tokens": { "type": "integer", "minimum": 0 },
+        "node_spec_tokens": { "type": "integer", "minimum": 0 },
+        "artifact_pack_tokens": { "type": "integer", "minimum": 0 },
+        "initial_input_tokens": { "type": "integer", "minimum": 0 },
+        "tool_result_reserve_tokens": { "type": "integer", "minimum": 0 },
+        "output_reserve_tokens": { "type": "integer", "minimum": 1 },
+        "safety_margin_tokens": { "type": "integer", "minimum": 1 },
+        "target_initial_input_ratio": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "hard_initial_input_ratio": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 }
+      }
+    },
+    "ContextItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "sha256", "mode", "estimated_tokens", "trust_class", "reason"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/Identifier" },
+        "sha256": { "$ref": "#/$defs/Digest" },
+        "mode": { "enum": ["FULL", "SUMMARY", "EVIDENCE_ONLY", "METADATA_ONLY"] },
+        "estimated_tokens": { "type": "integer", "minimum": 0 },
+        "trust_class": { "enum": ["TRUSTED_CONTRACT", "VERIFIED_DATA", "UNTRUSTED_DATA"] },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ContextPacket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context_packet_id",
+        "node_id",
+        "attempt_ordinal",
+        "spec_hash",
+        "generated_at",
+        "compiler_version",
+        "budget",
+        "items",
+        "exact_invariants",
+        "excluded_categories",
+        "packet_hash"
+      ],
+      "properties": {
+        "context_packet_id": { "$ref": "#/$defs/Identifier" },
+        "node_id": { "$ref": "#/$defs/Identifier" },
+        "attempt_ordinal": { "type": "integer", "minimum": 1 },
+        "spec_hash": { "$ref": "#/$defs/Digest" },
+        "generated_at": { "$ref": "#/$defs/Timestamp" },
+        "compiler_version": { "type": "string", "minLength": 1 },
+        "budget": { "$ref": "#/$defs/ContextBudget" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ContextItem" }
+        },
+        "exact_invariants": { "$ref": "#/$defs/StringList" },
+        "excluded_categories": { "$ref": "#/$defs/StringList" },
+        "packet_hash": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "ExitPacket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exit_packet_id",
+        "attempt_id",
+        "status",
+        "objective_result",
+        "completed_items",
+        "unresolved_items",
+        "decision_records",
+        "artifact_ids",
+        "evidence_ids",
+        "failure_fingerprints",
+        "recommended_next_action",
+        "created_at"
+      ],
+      "properties": {
+        "exit_packet_id": { "$ref": "#/$defs/Identifier" },
+        "attempt_id": { "$ref": "#/$defs/Identifier" },
+        "status": { "enum": ["SUCCEEDED", "FAILED", "BLOCKED", "ROTATED", "CANCELLED"] },
+        "objective_result": { "type": "string", "minLength": 1 },
+        "completed_items": { "$ref": "#/$defs/StringList" },
+        "unresolved_items": { "$ref": "#/$defs/StringList" },
+        "decision_records": { "$ref": "#/$defs/StringList" },
+        "artifact_ids": { "$ref": "#/$defs/IdList" },
+        "evidence_ids": { "$ref": "#/$defs/IdList" },
+        "failure_fingerprints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Digest" },
+          "uniqueItems": true
+        },
+        "recommended_next_action": { "type": "string", "minLength": 1 },
+        "created_at": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "RecoveryPacket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recovery_packet_id",
+        "attempt_id",
+        "resume_boundary",
+        "exact_contract_artifact_ids",
+        "checkpoint_artifact_id",
+        "completed_items",
+        "next_actions",
+        "prohibited_repeats",
+        "failure_fingerprints",
+        "created_at"
+      ],
+      "properties": {
+        "recovery_packet_id": { "$ref": "#/$defs/Identifier" },
+        "attempt_id": { "$ref": "#/$defs/Identifier" },
+        "resume_boundary": { "type": "string", "minLength": 1 },
+        "exact_contract_artifact_ids": { "$ref": "#/$defs/IdList" },
+        "checkpoint_artifact_id": { "$ref": "#/$defs/Identifier" },
+        "completed_items": { "$ref": "#/$defs/StringList" },
+        "next_actions": { "$ref": "#/$defs/StringList" },
+        "prohibited_repeats": { "$ref": "#/$defs/StringList" },
+        "failure_fingerprints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Digest" },
+          "uniqueItems": true
+        },
+        "created_at": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "ControlSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot_id",
+        "epoch_id",
+        "plan_revision",
+        "spec_hash",
+        "event_cursor",
+        "ready_node_ids",
+        "critical_path_node_ids",
+        "active_lease_ids",
+        "risk_ids",
+        "failure_fingerprints",
+        "unresolved_decision_ids",
+        "snapshot_hash",
+        "created_at"
+      ],
+      "properties": {
+        "snapshot_id": { "$ref": "#/$defs/Identifier" },
+        "epoch_id": { "$ref": "#/$defs/Identifier" },
+        "plan_revision": { "type": "integer", "minimum": 1 },
+        "spec_hash": { "$ref": "#/$defs/Digest" },
+        "event_cursor": { "type": "integer", "minimum": 0 },
+        "ready_node_ids": { "$ref": "#/$defs/IdList" },
+        "critical_path_node_ids": { "$ref": "#/$defs/IdList" },
+        "active_lease_ids": { "$ref": "#/$defs/IdList" },
+        "risk_ids": { "$ref": "#/$defs/IdList" },
+        "failure_fingerprints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Digest" },
+          "uniqueItems": true
+        },
+        "unresolved_decision_ids": { "$ref": "#/$defs/IdList" },
+        "snapshot_hash": { "$ref": "#/$defs/Digest" },
+        "created_at": { "$ref": "#/$defs/Timestamp" }
+      }
+    }
+  }
+}

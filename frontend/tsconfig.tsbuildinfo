@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/primitives.tsx","./src/views/capabilityview.tsx","./src/views/chatview.tsx","./src/views/contextinspectorview.tsx","./src/views/dagview.tsx","./src/views/harnessworkbenchview.tsx","./src/views/settingsview.tsx","./src/views/trajectoryview.tsx"],"version":"5.9.3"}

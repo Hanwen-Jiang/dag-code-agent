@@ -1,0 +1,5844 @@
+{
+  "schema_version": "0.2",
+  "manifest_id": "MANIFEST-AUTH-CALLBACK",
+  "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+  "plan": {
+    "plan_id": "PLAN-AUTH-CALLBACK",
+    "revision": 2,
+    "parent_revision": 1,
+    "title": "OAuth 回调 state 校验交付",
+    "objective": "实现可靠的 OAuth state 校验，并由内部技术验收和用户体验验收共同确认",
+    "status": "COMPLETED",
+    "created_at": "2026-07-31T08:00:00Z",
+    "created_by": {
+      "actor_type": "LLM_AGENT",
+      "actor_id": "AGENT-ARCHITECT-1",
+      "role": "architect",
+      "epoch_id": "EPOCH-ARCH-1"
+    },
+    "requirements": [
+      {
+        "requirement_id": "REQ-STATE",
+        "title": "拒绝无效 state",
+        "statement": "state 不匹配或已过期时拒绝 OAuth 回调",
+        "priority": "MUST",
+        "acceptance_criterion_ids": [
+          "CRIT-VERIFY-V2"
+        ]
+      },
+      {
+        "requirement_id": "REQ-REGRESSION",
+        "title": "保持正常登录",
+        "statement": "有效回调和现有登录流程保持正常",
+        "priority": "MUST",
+        "acceptance_criterion_ids": [
+          "CRIT-SYSTEM"
+        ]
+      },
+      {
+        "requirement_id": "REQ-USABILITY",
+        "title": "错误提示易懂",
+        "statement": "用户可理解失败原因并顺利完成正常登录",
+        "priority": "SHOULD",
+        "acceptance_criterion_ids": [
+          "CRIT-UAT"
+        ]
+      }
+    ],
+    "constraints": [
+      "生产与验收分离",
+      "只使用隔离测试数据",
+      "旧失败尝试保持可追溯"
+    ],
+    "flags": {
+      "user_uat_required": true,
+      "release_requested": false
+    },
+    "approval": {
+      "status": "APPROVED",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "decision_id": "AUTH-RECOVERY-1",
+      "approved_by": {
+        "actor_type": "POLICY_ENGINE",
+        "actor_id": "SYSTEM-POLICY-1",
+        "role": "policy_engine"
+      },
+      "approved_at": "2026-07-31T08:40:00Z"
+    },
+    "hub_policy": {
+      "blind_first_pass": true,
+      "max_challenge_rounds": 2,
+      "max_decisions_per_epoch": 12,
+      "max_input_tokens_per_epoch": 32000,
+      "max_wall_time_seconds": 1800,
+      "rotate_on_context_compaction": true
+    },
+    "concurrency_policy": {
+      "max_parallel_attempts": 4,
+      "lease_seconds": 300,
+      "write_conflict_policy": "ISOLATE_WORKTREE",
+      "optimistic_concurrency": true
+    }
+  },
+  "nodes": [
+    {
+      "node_id": "N-DESIGN",
+      "introduced_in_revision": 1,
+      "title": "冻结 OAuth state 校验接口与错误契约",
+      "objective": "冻结 OAuth state 校验接口与错误契约",
+      "work_type": "DESIGN",
+      "executor_role": "ARCHITECT",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "MEDIUM",
+      "requirement_ids": [
+        "REQ-STATE",
+        "REQ-REGRESSION"
+      ],
+      "input_contracts": [],
+      "output_contracts": [
+        {
+          "contract_id": "CONTRACT-AUTH",
+          "artifact_kind": "interface-contract",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "TRUSTED_CONTRACT"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-DESIGN",
+          "requirement_ids": [
+            "REQ-STATE"
+          ],
+          "statement": "接口契约明确 state 不匹配与过期行为",
+          "oracle_type": "CONTRACT_CHECK",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "NONE",
+        "final_gate": "NONE"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-DESIGN",
+        "side_effect_class": "REVERSIBLE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "READ_ONLY_DESIGN",
+      "write_scope": {
+        "allowed_paths": [],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-IMPLEMENT-V1",
+      "introduced_in_revision": 1,
+      "title": "按冻结契约实现第一版 state 校验",
+      "objective": "按冻结契约实现第一版 state 校验",
+      "work_type": "IMPLEMENT",
+      "executor_role": "DEVELOPER",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "HIGH",
+      "requirement_ids": [
+        "REQ-STATE",
+        "REQ-REGRESSION"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "CONTRACT-AUTH",
+          "artifact_kind": "interface-contract",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "TRUSTED_CONTRACT"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "PATCH-V1",
+          "artifact_kind": "source-patch",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-IMPLEMENT-V1",
+          "requirement_ids": [
+            "REQ-STATE"
+          ],
+          "statement": "第一版补丁实现冻结接口",
+          "oracle_type": "TEST",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "NONE",
+        "final_gate": "NONE"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-IMPLEMENT-V1",
+        "side_effect_class": "REVERSIBLE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "WRITE_SCOPED_DEV",
+      "write_scope": {
+        "allowed_paths": [
+          "src/auth/callback.py",
+          "tests/test_auth_callback.py"
+        ],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-VERIFY-V1",
+      "introduced_in_revision": 1,
+      "title": "独立验证第一版实现",
+      "objective": "独立验证第一版实现",
+      "work_type": "VERIFY",
+      "executor_role": "VERIFIER",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "HIGH",
+      "requirement_ids": [
+        "REQ-STATE",
+        "REQ-REGRESSION"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "CONTRACT-AUTH",
+          "artifact_kind": "interface-contract",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "TRUSTED_CONTRACT"
+        },
+        {
+          "contract_id": "PATCH-V1",
+          "artifact_kind": "source-patch",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "REPORT-V1",
+          "artifact_kind": "verification-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-VERIFY-V1",
+          "requirement_ids": [
+            "REQ-STATE"
+          ],
+          "statement": "第一版实现通过 state 失败路径测试",
+          "oracle_type": "TEST",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "AGENT",
+        "final_gate": "TECHNICAL_PASS"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-VERIFY-V1",
+        "side_effect_class": "NONE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "VERIFY_EXECUTE_NO_WRITE",
+      "write_scope": {
+        "allowed_paths": [],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-INTEGRATE",
+      "introduced_in_revision": 1,
+      "title": "将通过验收的实现合入隔离集成分支",
+      "objective": "将通过验收的实现合入隔离集成分支",
+      "work_type": "INTEGRATE",
+      "executor_role": "DEVELOPER",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "MEDIUM",
+      "requirement_ids": [
+        "REQ-STATE",
+        "REQ-REGRESSION"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "REPORT-V1",
+          "artifact_kind": "verification-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        },
+        {
+          "contract_id": "REPORT-V2",
+          "artifact_kind": "verification-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "BUILD-INTEGRATED",
+          "artifact_kind": "preview-build",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "METADATA_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-INTEGRATE",
+          "requirement_ids": [
+            "REQ-REGRESSION"
+          ],
+          "statement": "集成构建成功且只选择已通过的实现",
+          "oracle_type": "TEST",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ANY",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "NONE",
+        "final_gate": "NONE"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-INTEGRATE",
+        "side_effect_class": "REVERSIBLE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "WRITE_SCOPED_DEV",
+      "write_scope": {
+        "allowed_paths": [
+          "src/auth/**",
+          "tests/auth/**"
+        ],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-SYSTEM-VERIFY",
+      "introduced_in_revision": 1,
+      "title": "执行登录端到端与回归验收",
+      "objective": "执行登录端到端与回归验收",
+      "work_type": "VERIFY",
+      "executor_role": "SENIOR_VERIFIER",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "HIGH",
+      "requirement_ids": [
+        "REQ-STATE",
+        "REQ-REGRESSION"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "BUILD-INTEGRATED",
+          "artifact_kind": "preview-build",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "METADATA_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "REPORT-SYSTEM",
+          "artifact_kind": "system-test-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-SYSTEM",
+          "requirement_ids": [
+            "REQ-REGRESSION"
+          ],
+          "statement": "正常登录与错误回调端到端场景全部通过",
+          "oracle_type": "TEST",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "AGENT",
+        "final_gate": "TECHNICAL_PASS"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-SYSTEM-VERIFY",
+        "side_effect_class": "NONE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "SYSTEM_ACCEPTANCE_SANDBOX",
+      "write_scope": {
+        "allowed_paths": [],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-UAT-PREP",
+      "introduced_in_revision": 1,
+      "title": "启动隔离预览并完成冒烟检查",
+      "objective": "启动隔离预览并完成冒烟检查",
+      "work_type": "ENVIRONMENT",
+      "executor_role": "UAT_FACILITATOR",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "MEDIUM",
+      "requirement_ids": [
+        "REQ-USABILITY"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "BUILD-INTEGRATED",
+          "artifact_kind": "preview-build",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "METADATA_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        },
+        {
+          "contract_id": "REPORT-SYSTEM",
+          "artifact_kind": "system-test-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "UAT-PREVIEW",
+          "artifact_kind": "web-preview",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "METADATA_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-UAT-PREP",
+          "requirement_ids": [
+            "REQ-USABILITY"
+          ],
+          "statement": "预览可访问、测试账户可用且不接触正式数据",
+          "oracle_type": "TEST",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "NONE",
+        "final_gate": "NONE"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-UAT-PREP",
+        "side_effect_class": "REVERSIBLE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "USER_ACCEPTANCE_SANDBOX",
+      "write_scope": {
+        "allowed_paths": [],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-UAT",
+      "introduced_in_revision": 1,
+      "title": "由用户验收登录错误提示与跳转体验",
+      "objective": "由用户验收登录错误提示与跳转体验",
+      "work_type": "VERIFY",
+      "executor_role": "USER",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "HIGH",
+      "requirement_ids": [
+        "REQ-USABILITY"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "UAT-PREVIEW",
+          "artifact_kind": "web-preview",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "METADATA_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "UAT-RESULT",
+          "artifact_kind": "user-acceptance-record",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-UAT",
+          "requirement_ids": [
+            "REQ-USABILITY"
+          ],
+          "statement": "用户确认错误提示易懂且正常登录跳转符合预期",
+          "oracle_type": "USER_JUDGMENT",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "user"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "JOINT",
+        "final_gate": "BOTH_MUST_PASS"
+      },
+      "context_policy": {
+        "fresh_agent_required": false,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-UAT",
+        "side_effect_class": "NONE",
+        "retry_policy": {
+          "max_attempts": 1,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "USER_ACCEPTANCE_UI",
+      "write_scope": {
+        "allowed_paths": [],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-DIAGNOSIS",
+      "introduced_in_revision": 2,
+      "title": "定位第一版 state 过期判断使用错误时钟的根因",
+      "objective": "定位第一版 state 过期判断使用错误时钟的根因",
+      "work_type": "DIAGNOSIS",
+      "executor_role": "VERIFIER",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "MEDIUM",
+      "requirement_ids": [
+        "REQ-STATE"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "CONTRACT-AUTH",
+          "artifact_kind": "interface-contract",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "TRUSTED_CONTRACT"
+        },
+        {
+          "contract_id": "REPORT-V1",
+          "artifact_kind": "verification-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "DIAGNOSIS-AUTH",
+          "artifact_kind": "diagnosis-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-DIAGNOSIS",
+          "requirement_ids": [
+            "REQ-STATE"
+          ],
+          "statement": "根因由失败证据与最小复现共同支持",
+          "oracle_type": "TEST",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "NONE",
+        "final_gate": "NONE"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-DIAGNOSIS",
+        "side_effect_class": "NONE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "VERIFY_EXECUTE_NO_WRITE",
+      "write_scope": {
+        "allowed_paths": [],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-IMPLEMENT-V2",
+      "introduced_in_revision": 2,
+      "title": "依据根因修复 state 过期判断",
+      "objective": "依据根因修复 state 过期判断",
+      "work_type": "IMPLEMENT",
+      "executor_role": "DEVELOPER",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "HIGH",
+      "requirement_ids": [
+        "REQ-STATE",
+        "REQ-REGRESSION"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "CONTRACT-AUTH",
+          "artifact_kind": "interface-contract",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "TRUSTED_CONTRACT"
+        },
+        {
+          "contract_id": "DIAGNOSIS-AUTH",
+          "artifact_kind": "diagnosis-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "PATCH-V2",
+          "artifact_kind": "source-patch",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-IMPLEMENT-V2",
+          "requirement_ids": [
+            "REQ-STATE"
+          ],
+          "statement": "修复补丁仅修改时钟边界并补充回归测试",
+          "oracle_type": "TEST",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "NONE",
+        "final_gate": "NONE"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-IMPLEMENT-V2",
+        "side_effect_class": "REVERSIBLE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "WRITE_SCOPED_DEV",
+      "write_scope": {
+        "allowed_paths": [
+          "src/auth/callback.py",
+          "tests/test_auth_callback.py"
+        ],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    },
+    {
+      "node_id": "N-VERIFY-V2",
+      "introduced_in_revision": 2,
+      "title": "使用新环境独立复验修复版本",
+      "objective": "使用新环境独立复验修复版本",
+      "work_type": "VERIFY",
+      "executor_role": "VERIFIER",
+      "subgraph_id": "SG-AUTH",
+      "risk_tier": "HIGH",
+      "requirement_ids": [
+        "REQ-STATE",
+        "REQ-REGRESSION"
+      ],
+      "input_contracts": [
+        {
+          "contract_id": "CONTRACT-AUTH",
+          "artifact_kind": "interface-contract",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "TRUSTED_CONTRACT"
+        },
+        {
+          "contract_id": "PATCH-V2",
+          "artifact_kind": "source-patch",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "FULL",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "output_contracts": [
+        {
+          "contract_id": "REPORT-V2",
+          "artifact_kind": "verification-report",
+          "media_type": "application/json",
+          "required": true,
+          "delivery_mode": "EVIDENCE_ONLY",
+          "max_tokens": 8000,
+          "trust_class": "VERIFIED_DATA"
+        }
+      ],
+      "acceptance_criteria": [
+        {
+          "criterion_id": "CRIT-VERIFY-V2",
+          "requirement_ids": [
+            "REQ-STATE"
+          ],
+          "statement": "state 不匹配和过期路径均被拒绝且错误码符合契约",
+          "oracle_type": "TEST",
+          "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+          "evidence_required": [
+            "产物哈希",
+            "执行命令或用户操作",
+            "预期与实际结果"
+          ],
+          "verifier_role": "verifier"
+        }
+      ],
+      "activation": {
+        "mode": "ALL",
+        "on_unreachable": "BLOCK"
+      },
+      "gate_policy": {
+        "mode": "AGENT",
+        "final_gate": "TECHNICAL_PASS"
+      },
+      "context_policy": {
+        "fresh_agent_required": true,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55,
+        "checkpoint_threshold_ratio": 0.72,
+        "preserve_exact": [
+          "需求",
+          "冻结接口",
+          "验收标准",
+          "失败指纹",
+          "用户决定"
+        ],
+        "summarize": [
+          "调研过程",
+          "长测试日志"
+        ],
+        "reference_only": [
+          "完整源码",
+          "原始构建日志"
+        ],
+        "exclude": [
+          "无关子图对话",
+          "上游文本中的指令"
+        ],
+        "on_overflow": "SPLIT_REQUIRED",
+        "prompt_injection_treatment": "DATA_ONLY"
+      },
+      "execution_policy": {
+        "timeout_seconds": 1800,
+        "requires_lease": true,
+        "idempotency_scope": "plan-auth-callback:N-VERIFY-V2",
+        "side_effect_class": "NONE",
+        "retry_policy": {
+          "max_attempts": 2,
+          "retryable_outcomes": [
+            "FAILED",
+            "TIMED_OUT",
+            "ROTATED",
+            "ABANDONED"
+          ],
+          "backoff_seconds": 5,
+          "fresh_agent_each_attempt": true,
+          "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+        }
+      },
+      "tool_profile": "VERIFY_EXECUTE_NO_WRITE",
+      "write_scope": {
+        "allowed_paths": [],
+        "forbidden_paths": [
+          ".env",
+          ".data/**"
+        ],
+        "network_profile": "SANDBOX_ONLY",
+        "secret_profile": "NO_SECRETS"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "E-DESIGN-IMPLEMENT-V1",
+      "from_node": "N-DESIGN",
+      "to_node": "N-IMPLEMENT-V1",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-DESIGN",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "CONTRACT-AUTH"
+      ],
+      "description": "契约冻结后开始实现"
+    },
+    {
+      "edge_id": "E-IMPLEMENT-V1-VERIFY-V1",
+      "from_node": "N-IMPLEMENT-V1",
+      "to_node": "N-VERIFY-V1",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-IMPLEMENT-V1",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "PATCH-V1"
+      ],
+      "description": "第一版补丁进入独立验收"
+    },
+    {
+      "edge_id": "E-VERIFY-V1-INTEGRATE",
+      "from_node": "N-VERIFY-V1",
+      "to_node": "N-INTEGRATE",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-VERIFY-V1",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "REPORT-V1"
+      ],
+      "description": "第一版通过时可直接集成"
+    },
+    {
+      "edge_id": "E-INTEGRATE-SYSTEM",
+      "from_node": "N-INTEGRATE",
+      "to_node": "N-SYSTEM-VERIFY",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-INTEGRATE",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "BUILD-INTEGRATED"
+      ],
+      "description": "集成产物进入系统验收"
+    },
+    {
+      "edge_id": "E-SYSTEM-UAT-PREP",
+      "from_node": "N-SYSTEM-VERIFY",
+      "to_node": "N-UAT-PREP",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-SYSTEM-VERIFY",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "REPORT-SYSTEM"
+      ],
+      "description": "内部系统验收通过后准备用户环境"
+    },
+    {
+      "edge_id": "E-UAT-PREP-UAT",
+      "from_node": "N-UAT-PREP",
+      "to_node": "N-UAT",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-UAT-PREP",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "UAT-PREVIEW"
+      ],
+      "description": "冒烟检查通过后邀请用户"
+    },
+    {
+      "edge_id": "E-VERIFY-V1-DIAGNOSIS",
+      "from_node": "N-VERIFY-V1",
+      "to_node": "N-DIAGNOSIS",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-VERIFY-V1",
+          "operator": "EQ",
+          "value": "FAILED"
+        }
+      },
+      "artifact_contract_ids": [
+        "REPORT-V1"
+      ],
+      "description": "第一版失败触发根因诊断"
+    },
+    {
+      "edge_id": "E-DIAGNOSIS-IMPLEMENT-V2",
+      "from_node": "N-DIAGNOSIS",
+      "to_node": "N-IMPLEMENT-V2",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-DIAGNOSIS",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "DIAGNOSIS-AUTH"
+      ],
+      "description": "根因确认后进行限定修复"
+    },
+    {
+      "edge_id": "E-IMPLEMENT-V2-VERIFY-V2",
+      "from_node": "N-IMPLEMENT-V2",
+      "to_node": "N-VERIFY-V2",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-IMPLEMENT-V2",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "PATCH-V2"
+      ],
+      "description": "修复版本进入新鲜验收"
+    },
+    {
+      "edge_id": "E-VERIFY-V2-INTEGRATE",
+      "from_node": "N-VERIFY-V2",
+      "to_node": "N-INTEGRATE",
+      "edge_type": "CONTROL",
+      "gating": true,
+      "condition": {
+        "predicate": {
+          "source": "NODE_STATE",
+          "subject_id": "N-VERIFY-V2",
+          "operator": "EQ",
+          "value": "SUCCEEDED"
+        }
+      },
+      "artifact_contract_ids": [
+        "REPORT-V2"
+      ],
+      "description": "修复版本通过后解除集成阻塞"
+    }
+  ],
+  "attempts": [
+    {
+      "attempt_id": "ATT-DESIGN-1",
+      "node_id": "N-DESIGN",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T08:00:00Z",
+      "started_at": "2026-07-31T08:00:00Z",
+      "ended_at": "2026-07-31T08:10:00Z",
+      "agent_instance_id": "WORKER-DESIGN",
+      "context_packet_id": "CTX-DESIGN-1",
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-DESIGN-1",
+      "recovery_packet_id": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "ATT-IMPLEMENT-V1-1",
+      "node_id": "N-IMPLEMENT-V1",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T08:10:00Z",
+      "started_at": "2026-07-31T08:10:00Z",
+      "ended_at": "2026-07-31T08:20:00Z",
+      "agent_instance_id": "WORKER-IMPLEMENT-V1",
+      "context_packet_id": "CTX-IMPLEMENT-V1-1",
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-IMPLEMENT-V1-1",
+      "recovery_packet_id": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "ATT-VERIFY-V1-1",
+      "node_id": "N-VERIFY-V1",
+      "ordinal": 1,
+      "state": "FAILED",
+      "created_at": "2026-07-31T08:20:00Z",
+      "started_at": "2026-07-31T08:20:00Z",
+      "ended_at": "2026-07-31T08:30:00Z",
+      "agent_instance_id": "WORKER-VERIFY-V1",
+      "context_packet_id": "CTX-VERIFY-V1-1",
+      "lease": null,
+      "outcome": "FAILED",
+      "exit_packet_id": "EXIT-VERIFY-V1-1",
+      "recovery_packet_id": "RECOVERY-VERIFY-V1",
+      "failure": {
+        "code": "STATE-EXPIRY-BOUNDARY",
+        "message": "过期 state 在系统时钟回拨后被错误接受",
+        "retryable": false,
+        "fingerprint": "sha256:f20c77b4b0a13ccff85e2d119200b97b2429bbb7d5175f1e59e670cddccbb5a5"
+      }
+    },
+    {
+      "attempt_id": "ATT-DIAGNOSIS-1",
+      "node_id": "N-DIAGNOSIS",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T08:40:00Z",
+      "started_at": "2026-07-31T08:40:00Z",
+      "ended_at": "2026-07-31T08:50:00Z",
+      "agent_instance_id": "WORKER-DIAGNOSIS",
+      "context_packet_id": "CTX-DIAGNOSIS-1",
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-DIAGNOSIS-1",
+      "recovery_packet_id": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "ATT-IMPLEMENT-V2-1",
+      "node_id": "N-IMPLEMENT-V2",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T08:50:00Z",
+      "started_at": "2026-07-31T08:50:00Z",
+      "ended_at": "2026-07-31T09:00:00Z",
+      "agent_instance_id": "WORKER-IMPLEMENT-V2",
+      "context_packet_id": "CTX-IMPLEMENT-V2-1",
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-IMPLEMENT-V2-1",
+      "recovery_packet_id": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "ATT-VERIFY-V2-1",
+      "node_id": "N-VERIFY-V2",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T09:00:00Z",
+      "started_at": "2026-07-31T09:00:00Z",
+      "ended_at": "2026-07-31T09:10:00Z",
+      "agent_instance_id": "WORKER-VERIFY-V2",
+      "context_packet_id": "CTX-VERIFY-V2-1",
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-VERIFY-V2-1",
+      "recovery_packet_id": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "ATT-INTEGRATE-1",
+      "node_id": "N-INTEGRATE",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T09:10:00Z",
+      "started_at": "2026-07-31T09:10:00Z",
+      "ended_at": "2026-07-31T09:20:00Z",
+      "agent_instance_id": "WORKER-INTEGRATE",
+      "context_packet_id": "CTX-INTEGRATE-1",
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-INTEGRATE-1",
+      "recovery_packet_id": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "ATT-SYSTEM-1",
+      "node_id": "N-SYSTEM-VERIFY",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T09:20:00Z",
+      "started_at": "2026-07-31T09:20:00Z",
+      "ended_at": "2026-07-31T09:30:00Z",
+      "agent_instance_id": "WORKER-SYSTEM-VERIFY",
+      "context_packet_id": "CTX-SYSTEM-1",
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-SYSTEM-1",
+      "recovery_packet_id": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "ATT-UAT-PREP-1",
+      "node_id": "N-UAT-PREP",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T09:30:00Z",
+      "started_at": "2026-07-31T09:30:00Z",
+      "ended_at": "2026-07-31T09:40:00Z",
+      "agent_instance_id": "WORKER-UAT-PREP",
+      "context_packet_id": "CTX-UAT-PREP-1",
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-UAT-PREP-1",
+      "recovery_packet_id": null,
+      "failure": null
+    },
+    {
+      "attempt_id": "ATT-UAT-1",
+      "node_id": "N-UAT",
+      "ordinal": 1,
+      "state": "SUCCEEDED",
+      "created_at": "2026-07-31T09:40:00Z",
+      "started_at": "2026-07-31T09:40:00Z",
+      "ended_at": "2026-07-31T09:50:00Z",
+      "agent_instance_id": "USER-OWNER-1",
+      "context_packet_id": null,
+      "lease": null,
+      "outcome": "SUCCEEDED",
+      "exit_packet_id": "EXIT-UAT-1",
+      "recovery_packet_id": null,
+      "failure": null
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "ART-CONTRACT",
+      "contract_id": "CONTRACT-AUTH",
+      "kind": "interface-contract",
+      "uri": "artifact://cas/3504b12e8b9f6fcdf67a97c0c02527cc66b8921f20bca96b299de6baac3abb35",
+      "media_type": "application/json",
+      "sha256": "sha256:3504b12e8b9f6fcdf67a97c0c02527cc66b8921f20bca96b299de6baac3abb35",
+      "byte_size": 1046,
+      "producer_node_id": "N-DESIGN",
+      "producer_attempt_id": "ATT-DESIGN-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [],
+      "trust_class": "TRUSTED_CONTRACT",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T08:10:00Z"
+    },
+    {
+      "artifact_id": "ART-PATCH-V1",
+      "contract_id": "PATCH-V1",
+      "kind": "source-patch",
+      "uri": "artifact://cas/8ec50dc94eea35121a877ee1c0db3ef0532d4d0130003c1cee54e826efbf1947",
+      "media_type": "application/json",
+      "sha256": "sha256:8ec50dc94eea35121a877ee1c0db3ef0532d4d0130003c1cee54e826efbf1947",
+      "byte_size": 1041,
+      "producer_node_id": "N-IMPLEMENT-V1",
+      "producer_attempt_id": "ATT-IMPLEMENT-V1-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-CONTRACT"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T08:20:00Z"
+    },
+    {
+      "artifact_id": "ART-REPORT-V1",
+      "contract_id": "REPORT-V1",
+      "kind": "verification-report",
+      "uri": "artifact://cas/d0ca633a873526afb05360b72784c4eeb963ffa7aa52d4019b5dd751beda18a5",
+      "media_type": "application/json",
+      "sha256": "sha256:d0ca633a873526afb05360b72784c4eeb963ffa7aa52d4019b5dd751beda18a5",
+      "byte_size": 1042,
+      "producer_node_id": "N-VERIFY-V1",
+      "producer_attempt_id": "ATT-VERIFY-V1-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-PATCH-V1"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T08:30:00Z"
+    },
+    {
+      "artifact_id": "ART-DIAGNOSIS",
+      "contract_id": "DIAGNOSIS-AUTH",
+      "kind": "diagnosis-report",
+      "uri": "artifact://cas/3b116fede3d3c955adba94a19cd8f6ffe489ae2ff09f0d8b3b93742802f82683",
+      "media_type": "application/json",
+      "sha256": "sha256:3b116fede3d3c955adba94a19cd8f6ffe489ae2ff09f0d8b3b93742802f82683",
+      "byte_size": 1042,
+      "producer_node_id": "N-DIAGNOSIS",
+      "producer_attempt_id": "ATT-DIAGNOSIS-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-CONTRACT",
+        "ART-REPORT-V1"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T08:50:00Z"
+    },
+    {
+      "artifact_id": "ART-PATCH-V2",
+      "contract_id": "PATCH-V2",
+      "kind": "source-patch",
+      "uri": "artifact://cas/0b8bcc0e8da4677738977237caadedd6f347fcb4121e37b50bebe53ffd69a9d9",
+      "media_type": "application/json",
+      "sha256": "sha256:0b8bcc0e8da4677738977237caadedd6f347fcb4121e37b50bebe53ffd69a9d9",
+      "byte_size": 1041,
+      "producer_node_id": "N-IMPLEMENT-V2",
+      "producer_attempt_id": "ATT-IMPLEMENT-V2-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-CONTRACT",
+        "ART-DIAGNOSIS"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T09:00:00Z"
+    },
+    {
+      "artifact_id": "ART-REPORT-V2",
+      "contract_id": "REPORT-V2",
+      "kind": "verification-report",
+      "uri": "artifact://cas/ccf05a98b12caa3d52abca5f790625d0bd824075741adad0831b3829e13b448c",
+      "media_type": "application/json",
+      "sha256": "sha256:ccf05a98b12caa3d52abca5f790625d0bd824075741adad0831b3829e13b448c",
+      "byte_size": 1042,
+      "producer_node_id": "N-VERIFY-V2",
+      "producer_attempt_id": "ATT-VERIFY-V2-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-PATCH-V2"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T09:10:00Z"
+    },
+    {
+      "artifact_id": "ART-BUILD",
+      "contract_id": "BUILD-INTEGRATED",
+      "kind": "preview-build",
+      "uri": "artifact://cas/24ef3552f30e522eed660702d9fd26fd751263f16852669038b07fd3d493c453",
+      "media_type": "application/json",
+      "sha256": "sha256:24ef3552f30e522eed660702d9fd26fd751263f16852669038b07fd3d493c453",
+      "byte_size": 1049,
+      "producer_node_id": "N-INTEGRATE",
+      "producer_attempt_id": "ATT-INTEGRATE-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-PATCH-V2",
+        "ART-REPORT-V2"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T09:20:00Z"
+    },
+    {
+      "artifact_id": "ART-SYSTEM-REPORT",
+      "contract_id": "REPORT-SYSTEM",
+      "kind": "system-test-report",
+      "uri": "artifact://cas/89841e7f4ce40d7c63a87e64eacbf80a07e734e75a8feeb89bfd5a7850ddd79f",
+      "media_type": "application/json",
+      "sha256": "sha256:89841e7f4ce40d7c63a87e64eacbf80a07e734e75a8feeb89bfd5a7850ddd79f",
+      "byte_size": 1046,
+      "producer_node_id": "N-SYSTEM-VERIFY",
+      "producer_attempt_id": "ATT-SYSTEM-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-BUILD"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T09:30:00Z"
+    },
+    {
+      "artifact_id": "ART-UAT-PREVIEW",
+      "contract_id": "UAT-PREVIEW",
+      "kind": "web-preview",
+      "uri": "artifact://cas/630fe7832db9471ff3f617d35b6133726bfd32dbaaf9ac794daccaf6660ef5d7",
+      "media_type": "application/json",
+      "sha256": "sha256:630fe7832db9471ff3f617d35b6133726bfd32dbaaf9ac794daccaf6660ef5d7",
+      "byte_size": 1044,
+      "producer_node_id": "N-UAT-PREP",
+      "producer_attempt_id": "ATT-UAT-PREP-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-BUILD",
+        "ART-SYSTEM-REPORT"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T09:40:00Z"
+    },
+    {
+      "artifact_id": "ART-UAT-RESULT",
+      "contract_id": "UAT-RESULT",
+      "kind": "user-acceptance-record",
+      "uri": "artifact://cas/55e8c08e3ae9ce7fb85534679cd83495ccc5741af8bc1171219f0a009e6e98df",
+      "media_type": "application/json",
+      "sha256": "sha256:55e8c08e3ae9ce7fb85534679cd83495ccc5741af8bc1171219f0a009e6e98df",
+      "byte_size": 1043,
+      "producer_node_id": "N-UAT",
+      "producer_attempt_id": "ATT-UAT-1",
+      "source_snapshot": "sha256:8c11036790e8c9696eb67a9e42a052d1dc39e9e6b8cf176b58f017ac28677c62",
+      "upstream_artifact_ids": [
+        "ART-UAT-PREVIEW"
+      ],
+      "trust_class": "VERIFIED_DATA",
+      "sensitivity": "INTERNAL",
+      "immutable": true,
+      "created_at": "2026-07-31T09:50:00Z"
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "EVID-VERIFY-V1",
+      "criterion_id": "CRIT-VERIFY-V1",
+      "requirement_ids": [
+        "REQ-STATE"
+      ],
+      "producer_attempt_id": "ATT-VERIFY-V1-1",
+      "artifact_ids": [
+        "ART-REPORT-V1"
+      ],
+      "method": "执行冻结验收场景并记录结构化结果",
+      "oracle": "验收标准与实际结果逐项比较",
+      "verdict": "FAIL",
+      "expected": "过期 state 始终被拒绝",
+      "observed": "系统时钟回拨后过期 state 被接受",
+      "environment_digest": "sha256:439c245d20df8710c59b6e2003c25f5b8ca755672b57721d3f2863111e6dda85",
+      "fresh_until": "2026-08-07T00:00:00Z",
+      "created_at": "2026-07-31T08:30:00Z"
+    },
+    {
+      "evidence_id": "EVID-VERIFY-V2",
+      "criterion_id": "CRIT-VERIFY-V2",
+      "requirement_ids": [
+        "REQ-STATE"
+      ],
+      "producer_attempt_id": "ATT-VERIFY-V2-1",
+      "artifact_ids": [
+        "ART-REPORT-V2"
+      ],
+      "method": "执行冻结验收场景并记录结构化结果",
+      "oracle": "验收标准与实际结果逐项比较",
+      "verdict": "PASS",
+      "expected": "不匹配与过期 state 均被拒绝",
+      "observed": "12 个边界场景全部返回冻结错误码",
+      "environment_digest": "sha256:439c245d20df8710c59b6e2003c25f5b8ca755672b57721d3f2863111e6dda85",
+      "fresh_until": "2026-08-07T00:00:00Z",
+      "created_at": "2026-07-31T09:10:00Z"
+    },
+    {
+      "evidence_id": "EVID-SYSTEM",
+      "criterion_id": "CRIT-SYSTEM",
+      "requirement_ids": [
+        "REQ-REGRESSION"
+      ],
+      "producer_attempt_id": "ATT-SYSTEM-1",
+      "artifact_ids": [
+        "ART-SYSTEM-REPORT"
+      ],
+      "method": "执行冻结验收场景并记录结构化结果",
+      "oracle": "验收标准与实际结果逐项比较",
+      "verdict": "PASS",
+      "expected": "正常登录与错误回调端到端通过",
+      "observed": "8 个端到端场景与 34 个回归测试通过",
+      "environment_digest": "sha256:439c245d20df8710c59b6e2003c25f5b8ca755672b57721d3f2863111e6dda85",
+      "fresh_until": "2026-08-07T00:00:00Z",
+      "created_at": "2026-07-31T09:30:00Z"
+    },
+    {
+      "evidence_id": "EVID-UAT-PREP",
+      "criterion_id": "CRIT-UAT-PREP",
+      "requirement_ids": [
+        "REQ-USABILITY"
+      ],
+      "producer_attempt_id": "ATT-UAT-PREP-1",
+      "artifact_ids": [
+        "ART-UAT-PREVIEW"
+      ],
+      "method": "执行冻结验收场景并记录结构化结果",
+      "oracle": "验收标准与实际结果逐项比较",
+      "verdict": "PASS",
+      "expected": "隔离预览和测试数据可用",
+      "observed": "健康检查、重置和冒烟步骤全部通过",
+      "environment_digest": "sha256:439c245d20df8710c59b6e2003c25f5b8ca755672b57721d3f2863111e6dda85",
+      "fresh_until": "2026-08-07T00:00:00Z",
+      "created_at": "2026-07-31T09:40:00Z"
+    },
+    {
+      "evidence_id": "EVID-UAT",
+      "criterion_id": "CRIT-UAT",
+      "requirement_ids": [
+        "REQ-USABILITY"
+      ],
+      "producer_attempt_id": "ATT-UAT-1",
+      "artifact_ids": [
+        "ART-UAT-RESULT"
+      ],
+      "method": "执行冻结验收场景并记录结构化结果",
+      "oracle": "验收标准与实际结果逐项比较",
+      "verdict": "PASS",
+      "expected": "用户确认提示与跳转体验",
+      "observed": "用户选择 PASS，并留下无阻断反馈",
+      "environment_digest": "sha256:439c245d20df8710c59b6e2003c25f5b8ca755672b57721d3f2863111e6dda85",
+      "fresh_until": "2026-08-07T00:00:00Z",
+      "created_at": "2026-07-31T09:50:00Z"
+    }
+  ],
+  "events": [
+    {
+      "event_id": "EVT-0001",
+      "sequence": 1,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "PLAN",
+      "aggregate_id": "PLAN-AUTH-CALLBACK",
+      "event_type": "PLAN_SUBMITTED_FOR_REVIEW",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "DRAFT",
+        "to_state": "IN_REVIEW",
+        "revision": 1,
+        "reported_by": {
+          "actor_type": "LLM_AGENT",
+          "actor_id": "AGENT-ARCHITECT-1",
+          "role": "architect",
+          "epoch_id": "EPOCH-ARCH-1"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": null,
+      "idempotency_key": "run-auth-callback:1",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": null,
+      "event_hash": "sha256:ffe50383b02047bac0412489698e8e79fa9142e9ad9b80e04522cf43cd008814"
+    },
+    {
+      "event_id": "EVT-0002",
+      "sequence": 2,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "PLAN",
+      "aggregate_id": "PLAN-AUTH-CALLBACK",
+      "event_type": "PLAN_APPROVED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "IN_REVIEW",
+        "to_state": "APPROVED",
+        "revision": 1,
+        "reported_by": {
+          "actor_type": "USER",
+          "actor_id": "USER-OWNER-1",
+          "role": "project_owner"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0001",
+      "idempotency_key": "run-auth-callback:2",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:ffe50383b02047bac0412489698e8e79fa9142e9ad9b80e04522cf43cd008814",
+      "event_hash": "sha256:d420f8257e015d4220ed1579f2b8bad432d7df51af9a5209ecb6ad41619a57ec"
+    },
+    {
+      "event_id": "EVT-0003",
+      "sequence": 3,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "PLAN",
+      "aggregate_id": "PLAN-AUTH-CALLBACK",
+      "event_type": "PLAN_COMPILED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "APPROVED",
+        "to_state": "READY",
+        "revision": 1
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0002",
+      "idempotency_key": "run-auth-callback:3",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:d420f8257e015d4220ed1579f2b8bad432d7df51af9a5209ecb6ad41619a57ec",
+      "event_hash": "sha256:51c68a8c5ade503c64343601f50c4af5038365f0c900424a1bbcd4825fff7a39"
+    },
+    {
+      "event_id": "EVT-0004",
+      "sequence": 4,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "PLAN",
+      "aggregate_id": "PLAN-AUTH-CALLBACK",
+      "event_type": "PLAN_EXECUTION_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "RUNNING",
+        "revision": 1
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0003",
+      "idempotency_key": "run-auth-callback:4",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:51c68a8c5ade503c64343601f50c4af5038365f0c900424a1bbcd4825fff7a39",
+      "event_hash": "sha256:5bbd26416f213e58ec24da91d9e6a924e52757a6fa25da40e2ba7cbc9d6d8088"
+    },
+    {
+      "event_id": "EVT-0005",
+      "sequence": 5,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DESIGN",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0004",
+      "idempotency_key": "run-auth-callback:5",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:5bbd26416f213e58ec24da91d9e6a924e52757a6fa25da40e2ba7cbc9d6d8088",
+      "event_hash": "sha256:bedbbca3145ccfe8a3221dfd9905e2a54a4a566704a6d5e90db91c2056a45514"
+    },
+    {
+      "event_id": "EVT-0006",
+      "sequence": 6,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V1",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0005",
+      "idempotency_key": "run-auth-callback:6",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:bedbbca3145ccfe8a3221dfd9905e2a54a4a566704a6d5e90db91c2056a45514",
+      "event_hash": "sha256:9876a4ccd211a735be857e722e4c9e56b913490b86c8847f38751613906a66da"
+    },
+    {
+      "event_id": "EVT-0007",
+      "sequence": 7,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V1",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0006",
+      "idempotency_key": "run-auth-callback:7",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:9876a4ccd211a735be857e722e4c9e56b913490b86c8847f38751613906a66da",
+      "event_hash": "sha256:9fcb3abc887beb46ece4dc281c8a7c12d8af874685f9b21a79d06c8ca8e472c1"
+    },
+    {
+      "event_id": "EVT-0008",
+      "sequence": 8,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-INTEGRATE",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0007",
+      "idempotency_key": "run-auth-callback:8",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:9fcb3abc887beb46ece4dc281c8a7c12d8af874685f9b21a79d06c8ca8e472c1",
+      "event_hash": "sha256:ec2fceed60fc39f54fa93cf8cec563d3253cb4f40f90e3ef167acdff2a86aa07"
+    },
+    {
+      "event_id": "EVT-0009",
+      "sequence": 9,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-SYSTEM-VERIFY",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0008",
+      "idempotency_key": "run-auth-callback:9",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:ec2fceed60fc39f54fa93cf8cec563d3253cb4f40f90e3ef167acdff2a86aa07",
+      "event_hash": "sha256:91200723173487da75ab6d5361ad1f15584e1f3f3312473c4af5451d652f27e1"
+    },
+    {
+      "event_id": "EVT-0010",
+      "sequence": 10,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT-PREP",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0009",
+      "idempotency_key": "run-auth-callback:10",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:91200723173487da75ab6d5361ad1f15584e1f3f3312473c4af5451d652f27e1",
+      "event_hash": "sha256:44b4a1c2e40bb03b73a6f427864834e1c5990193760cf057ff281211c8861a8d"
+    },
+    {
+      "event_id": "EVT-0011",
+      "sequence": 11,
+      "timestamp": "2026-07-31T08:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0010",
+      "idempotency_key": "run-auth-callback:11",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:44b4a1c2e40bb03b73a6f427864834e1c5990193760cf057ff281211c8861a8d",
+      "event_hash": "sha256:8c3610fb6126569ddcef7e564a43709222aa842a7acb2de3bc8ba19409980446"
+    },
+    {
+      "event_id": "EVT-0012",
+      "sequence": 12,
+      "timestamp": "2026-07-31T08:10:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DESIGN",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0011",
+      "idempotency_key": "run-auth-callback:12",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:8c3610fb6126569ddcef7e564a43709222aa842a7acb2de3bc8ba19409980446",
+      "event_hash": "sha256:b44dcbd9f3da410a90b5a4833f1263d7c12d93572c39b380f127730aad8a1e25"
+    },
+    {
+      "event_id": "EVT-0013",
+      "sequence": 13,
+      "timestamp": "2026-07-31T08:10:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DESIGN",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0012",
+      "idempotency_key": "run-auth-callback:13",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:b44dcbd9f3da410a90b5a4833f1263d7c12d93572c39b380f127730aad8a1e25",
+      "event_hash": "sha256:9354296d0254c75d594db0d788858ce1d63ef99b765bbe6387285aceb49ea9e5"
+    },
+    {
+      "event_id": "EVT-0014",
+      "sequence": 14,
+      "timestamp": "2026-07-31T08:10:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-DESIGN-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0013",
+      "idempotency_key": "run-auth-callback:14",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:9354296d0254c75d594db0d788858ce1d63ef99b765bbe6387285aceb49ea9e5",
+      "event_hash": "sha256:7d416bb509a97a5767245d1500ebe3b2f7225a824aaf9583c4856be825f265e1"
+    },
+    {
+      "event_id": "EVT-0015",
+      "sequence": 15,
+      "timestamp": "2026-07-31T08:10:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DESIGN",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-DESIGN",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0014",
+      "idempotency_key": "run-auth-callback:15",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:7d416bb509a97a5767245d1500ebe3b2f7225a824aaf9583c4856be825f265e1",
+      "event_hash": "sha256:deadeaa43946114e2afbfbac5aaecf052ecf5a253d5e3c45746d0cffe6375954"
+    },
+    {
+      "event_id": "EVT-0016",
+      "sequence": 16,
+      "timestamp": "2026-07-31T08:10:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-DESIGN-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-DESIGN",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0015",
+      "idempotency_key": "run-auth-callback:16",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:deadeaa43946114e2afbfbac5aaecf052ecf5a253d5e3c45746d0cffe6375954",
+      "event_hash": "sha256:a6908073f2503b1c577aa2f3533ff285238c98057e7bc63c9dc47a04f03961c0"
+    },
+    {
+      "event_id": "EVT-0017",
+      "sequence": 17,
+      "timestamp": "2026-07-31T08:10:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-DESIGN-1",
+      "event_type": "ATTEMPT_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-DESIGN",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0016",
+      "idempotency_key": "run-auth-callback:17",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:a6908073f2503b1c577aa2f3533ff285238c98057e7bc63c9dc47a04f03961c0",
+      "event_hash": "sha256:7b526fbae0be522c44aa6f39523acc05343aac38a0fbbf61616faf4fcd94b73a"
+    },
+    {
+      "event_id": "EVT-0018",
+      "sequence": 18,
+      "timestamp": "2026-07-31T08:10:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DESIGN",
+      "event_type": "NODE_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0017",
+      "idempotency_key": "run-auth-callback:18",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:7b526fbae0be522c44aa6f39523acc05343aac38a0fbbf61616faf4fcd94b73a",
+      "event_hash": "sha256:fdf08a05398174f2ee6db93237fd3bd1e2258fb17cae4dcd28a2c5785ee1bfe9"
+    },
+    {
+      "event_id": "EVT-0019",
+      "sequence": 19,
+      "timestamp": "2026-07-31T08:20:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V1",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0018",
+      "idempotency_key": "run-auth-callback:19",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:fdf08a05398174f2ee6db93237fd3bd1e2258fb17cae4dcd28a2c5785ee1bfe9",
+      "event_hash": "sha256:66b947e0114f1fb3b8efa9b8b52207ba9d8bff80a8f6d7c30f82b6b62abdfde4"
+    },
+    {
+      "event_id": "EVT-0020",
+      "sequence": 20,
+      "timestamp": "2026-07-31T08:20:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V1",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0019",
+      "idempotency_key": "run-auth-callback:20",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:66b947e0114f1fb3b8efa9b8b52207ba9d8bff80a8f6d7c30f82b6b62abdfde4",
+      "event_hash": "sha256:8225071e4056d10e81751c3f6faa9954c42af20c11f6f59b70abd98eaeafdccc"
+    },
+    {
+      "event_id": "EVT-0021",
+      "sequence": 21,
+      "timestamp": "2026-07-31T08:20:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-IMPLEMENT-V1-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0020",
+      "idempotency_key": "run-auth-callback:21",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:8225071e4056d10e81751c3f6faa9954c42af20c11f6f59b70abd98eaeafdccc",
+      "event_hash": "sha256:d40b9d7784d396b37082dda21a82f3d863f8b2a71e465085ce5e6af7fd5e21ed"
+    },
+    {
+      "event_id": "EVT-0022",
+      "sequence": 22,
+      "timestamp": "2026-07-31T08:20:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-IMPLEMENT-V1",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0021",
+      "idempotency_key": "run-auth-callback:22",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:d40b9d7784d396b37082dda21a82f3d863f8b2a71e465085ce5e6af7fd5e21ed",
+      "event_hash": "sha256:01c4ca6308fb4f7bce3d9141c763d96eac49844c8aaed1ba3432b5a976ed94fb"
+    },
+    {
+      "event_id": "EVT-0023",
+      "sequence": 23,
+      "timestamp": "2026-07-31T08:20:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-IMPLEMENT-V1-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-IMPLEMENT-V1",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0022",
+      "idempotency_key": "run-auth-callback:23",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:01c4ca6308fb4f7bce3d9141c763d96eac49844c8aaed1ba3432b5a976ed94fb",
+      "event_hash": "sha256:51d63f5fefb81bc23ff5ffbf53cd93185712d2e760b076ee2a58f1314d872612"
+    },
+    {
+      "event_id": "EVT-0024",
+      "sequence": 24,
+      "timestamp": "2026-07-31T08:20:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-IMPLEMENT-V1-1",
+      "event_type": "ATTEMPT_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-IMPLEMENT-V1",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0023",
+      "idempotency_key": "run-auth-callback:24",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:51d63f5fefb81bc23ff5ffbf53cd93185712d2e760b076ee2a58f1314d872612",
+      "event_hash": "sha256:67e2785fe329ec4b38de2ff2c3a00f6f428f3e74f8088f0040dcc498b615a71c"
+    },
+    {
+      "event_id": "EVT-0025",
+      "sequence": 25,
+      "timestamp": "2026-07-31T08:20:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V1",
+      "event_type": "NODE_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0024",
+      "idempotency_key": "run-auth-callback:25",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:67e2785fe329ec4b38de2ff2c3a00f6f428f3e74f8088f0040dcc498b615a71c",
+      "event_hash": "sha256:48a0c0c4d5533ce10b4b8ed7c0951c4881493d7d2b757ea30dfa82b5151701c5"
+    },
+    {
+      "event_id": "EVT-0026",
+      "sequence": 26,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V1",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0025",
+      "idempotency_key": "run-auth-callback:26",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:48a0c0c4d5533ce10b4b8ed7c0951c4881493d7d2b757ea30dfa82b5151701c5",
+      "event_hash": "sha256:69f8cdc91999a4bdf9a65b591f3e4263526ffbf51f495069ba8bd4b89096fff3"
+    },
+    {
+      "event_id": "EVT-0027",
+      "sequence": 27,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V1",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0026",
+      "idempotency_key": "run-auth-callback:27",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:69f8cdc91999a4bdf9a65b591f3e4263526ffbf51f495069ba8bd4b89096fff3",
+      "event_hash": "sha256:7e3b8a66adb439d423b604af379be41da826861d4df861dbd8f40efaa6163181"
+    },
+    {
+      "event_id": "EVT-0028",
+      "sequence": 28,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-VERIFY-V1-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0027",
+      "idempotency_key": "run-auth-callback:28",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:7e3b8a66adb439d423b604af379be41da826861d4df861dbd8f40efaa6163181",
+      "event_hash": "sha256:4d3619f7ba7da1b6b5db4a312caf2a18e78054244d008fc00338bff71a0da4ef"
+    },
+    {
+      "event_id": "EVT-0029",
+      "sequence": 29,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-VERIFY-V1",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0028",
+      "idempotency_key": "run-auth-callback:29",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:4d3619f7ba7da1b6b5db4a312caf2a18e78054244d008fc00338bff71a0da4ef",
+      "event_hash": "sha256:5c75c3cf3aab1acd77bbdaefae0bbde6f143ba7644c506c196444b45c0aef07b"
+    },
+    {
+      "event_id": "EVT-0030",
+      "sequence": 30,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-VERIFY-V1-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-VERIFY-V1",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0029",
+      "idempotency_key": "run-auth-callback:30",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:5c75c3cf3aab1acd77bbdaefae0bbde6f143ba7644c506c196444b45c0aef07b",
+      "event_hash": "sha256:9634f4faf690e24552e3ca13881305388a3d55d0b67af409a76cc1bee2592e6b"
+    },
+    {
+      "event_id": "EVT-0031",
+      "sequence": 31,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-VERIFY-V1-1",
+      "event_type": "ATTEMPT_FAILED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "FAILED",
+        "evidence_id": "EVID-VERIFY-V1",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-VERIFY-V1",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0030",
+      "idempotency_key": "run-auth-callback:31",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:9634f4faf690e24552e3ca13881305388a3d55d0b67af409a76cc1bee2592e6b",
+      "event_hash": "sha256:ce8c34dc820bff246d944762819f18b1bc65a3a5cce4913c31d6eaab227a92e5"
+    },
+    {
+      "event_id": "EVT-0032",
+      "sequence": 32,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V1",
+      "event_type": "NODE_FAILED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "FAILED",
+        "evidence_id": "EVID-VERIFY-V1"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0031",
+      "idempotency_key": "run-auth-callback:32",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:ce8c34dc820bff246d944762819f18b1bc65a3a5cce4913c31d6eaab227a92e5",
+      "event_hash": "sha256:5e96b019d10b98abfb20cf7c1fe84addcfee163308537dadb12866c294368b43"
+    },
+    {
+      "event_id": "EVT-0033",
+      "sequence": 33,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-INTEGRATE",
+      "event_type": "NODE_DEPENDENCY_BLOCKED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "BLOCKED",
+        "failed_node_id": "N-VERIFY-V1"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0032",
+      "idempotency_key": "run-auth-callback:33",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:5e96b019d10b98abfb20cf7c1fe84addcfee163308537dadb12866c294368b43",
+      "event_hash": "sha256:fa383d56a37ff016c5c49a9af4cedc895e5cb73b9b777567fdbde201a3af1d7d"
+    },
+    {
+      "event_id": "EVT-0034",
+      "sequence": 34,
+      "timestamp": "2026-07-31T08:30:00Z",
+      "aggregate_type": "PATCH",
+      "aggregate_id": "PATCH-RECOVERY-1",
+      "event_type": "GRAPH_PATCH_PROPOSED",
+      "actor": {
+        "actor_type": "LLM_AGENT",
+        "actor_id": "AGENT-HUB-PROGRESS-1",
+        "role": "hub_progress",
+        "epoch_id": "EPOCH-HUB-7"
+      },
+      "expected_version": 0,
+      "payload": {
+        "base_revision": 1
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0033",
+      "idempotency_key": "run-auth-callback:34",
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "prev_event_hash": "sha256:fa383d56a37ff016c5c49a9af4cedc895e5cb73b9b777567fdbde201a3af1d7d",
+      "event_hash": "sha256:a3b97614be9a00a105fe4068797da44039ba0ea14deb9f5cc39be3a266df3d93"
+    },
+    {
+      "event_id": "EVT-0035",
+      "sequence": 35,
+      "timestamp": "2026-07-31T08:40:00Z",
+      "aggregate_type": "PATCH",
+      "aggregate_id": "PATCH-RECOVERY-1",
+      "event_type": "GRAPH_PATCH_APPLIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "applied_revision": 2,
+        "authorized_by": {
+          "actor_type": "POLICY_ENGINE",
+          "actor_id": "SYSTEM-POLICY-1",
+          "role": "policy_engine"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0034",
+      "idempotency_key": "run-auth-callback:35",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:a3b97614be9a00a105fe4068797da44039ba0ea14deb9f5cc39be3a266df3d93",
+      "event_hash": "sha256:97235a92b79ae08b37060c72665596925741f2694825b3368e3aa4de8c8ecdbb"
+    },
+    {
+      "event_id": "EVT-0036",
+      "sequence": 36,
+      "timestamp": "2026-07-31T08:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DIAGNOSIS",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0035",
+      "idempotency_key": "run-auth-callback:36",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:97235a92b79ae08b37060c72665596925741f2694825b3368e3aa4de8c8ecdbb",
+      "event_hash": "sha256:c6b04e673a9f536dbb5cddbbde1da53c38d778be3329b1486c037c67fab93ec6"
+    },
+    {
+      "event_id": "EVT-0037",
+      "sequence": 37,
+      "timestamp": "2026-07-31T08:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V2",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0036",
+      "idempotency_key": "run-auth-callback:37",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:c6b04e673a9f536dbb5cddbbde1da53c38d778be3329b1486c037c67fab93ec6",
+      "event_hash": "sha256:e36ff9884ad1204f86e9b7258ec06162962bcc5e44cb67cb5c53d24f1904326f"
+    },
+    {
+      "event_id": "EVT-0038",
+      "sequence": 38,
+      "timestamp": "2026-07-31T08:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V2",
+      "event_type": "NODE_REGISTERED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "PLANNED",
+        "to_state": "WAITING_DEPENDENCIES"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0037",
+      "idempotency_key": "run-auth-callback:38",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:e36ff9884ad1204f86e9b7258ec06162962bcc5e44cb67cb5c53d24f1904326f",
+      "event_hash": "sha256:0675872b28f78a6888ca29030d83f7510ab676bdc61ea3eb95fd6c54c4f9fd67"
+    },
+    {
+      "event_id": "EVT-0039",
+      "sequence": 39,
+      "timestamp": "2026-07-31T08:50:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DIAGNOSIS",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0038",
+      "idempotency_key": "run-auth-callback:39",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:0675872b28f78a6888ca29030d83f7510ab676bdc61ea3eb95fd6c54c4f9fd67",
+      "event_hash": "sha256:49ae21f3c639ee2e7ce501613905792dce1698e185e53427fde6488fc5fb841b"
+    },
+    {
+      "event_id": "EVT-0040",
+      "sequence": 40,
+      "timestamp": "2026-07-31T08:50:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DIAGNOSIS",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0039",
+      "idempotency_key": "run-auth-callback:40",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:49ae21f3c639ee2e7ce501613905792dce1698e185e53427fde6488fc5fb841b",
+      "event_hash": "sha256:5dc1c55247de342713346a39f1bc0ef16c6aa22576d6a822d8a568a1f42de53f"
+    },
+    {
+      "event_id": "EVT-0041",
+      "sequence": 41,
+      "timestamp": "2026-07-31T08:50:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-DIAGNOSIS-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0040",
+      "idempotency_key": "run-auth-callback:41",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:5dc1c55247de342713346a39f1bc0ef16c6aa22576d6a822d8a568a1f42de53f",
+      "event_hash": "sha256:db6c72601fa9014e0f64aee44b741a994c43dc56040b0652f577d95d68c19f8a"
+    },
+    {
+      "event_id": "EVT-0042",
+      "sequence": 42,
+      "timestamp": "2026-07-31T08:50:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DIAGNOSIS",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-DIAGNOSIS",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0041",
+      "idempotency_key": "run-auth-callback:42",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:db6c72601fa9014e0f64aee44b741a994c43dc56040b0652f577d95d68c19f8a",
+      "event_hash": "sha256:c9bf76be51a005dde6f4c5c0593be8d5f20a31aa0fcbd7e3a1cd8a8cfd324927"
+    },
+    {
+      "event_id": "EVT-0043",
+      "sequence": 43,
+      "timestamp": "2026-07-31T08:50:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-DIAGNOSIS-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-DIAGNOSIS",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0042",
+      "idempotency_key": "run-auth-callback:43",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:c9bf76be51a005dde6f4c5c0593be8d5f20a31aa0fcbd7e3a1cd8a8cfd324927",
+      "event_hash": "sha256:b55acf85f67f06af9d4ffbc7db2b8e13699ebb9662799b05574f8b73efa5cf92"
+    },
+    {
+      "event_id": "EVT-0044",
+      "sequence": 44,
+      "timestamp": "2026-07-31T08:50:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-DIAGNOSIS-1",
+      "event_type": "ATTEMPT_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-DIAGNOSIS",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0043",
+      "idempotency_key": "run-auth-callback:44",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:b55acf85f67f06af9d4ffbc7db2b8e13699ebb9662799b05574f8b73efa5cf92",
+      "event_hash": "sha256:13c062cc9b7f83f4ffaceba525315926f6f7bbf0dcdc011a02758840c5578932"
+    },
+    {
+      "event_id": "EVT-0045",
+      "sequence": 45,
+      "timestamp": "2026-07-31T08:50:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-DIAGNOSIS",
+      "event_type": "NODE_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0044",
+      "idempotency_key": "run-auth-callback:45",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:13c062cc9b7f83f4ffaceba525315926f6f7bbf0dcdc011a02758840c5578932",
+      "event_hash": "sha256:dc708560d29247c0ee7f826ac4246446897ef2d0882d8c6753bf10743991d4d9"
+    },
+    {
+      "event_id": "EVT-0046",
+      "sequence": 46,
+      "timestamp": "2026-07-31T09:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V2",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0045",
+      "idempotency_key": "run-auth-callback:46",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:dc708560d29247c0ee7f826ac4246446897ef2d0882d8c6753bf10743991d4d9",
+      "event_hash": "sha256:b2061844cb2727b348660cfb4babf0eeb12b27bfb7ed46f046cfe1fd16ffa618"
+    },
+    {
+      "event_id": "EVT-0047",
+      "sequence": 47,
+      "timestamp": "2026-07-31T09:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V2",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0046",
+      "idempotency_key": "run-auth-callback:47",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:b2061844cb2727b348660cfb4babf0eeb12b27bfb7ed46f046cfe1fd16ffa618",
+      "event_hash": "sha256:4de52825c8cb7e67bef3bda175ff4605767200ab1f842c13cb8dc62d45c00d40"
+    },
+    {
+      "event_id": "EVT-0048",
+      "sequence": 48,
+      "timestamp": "2026-07-31T09:00:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-IMPLEMENT-V2-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0047",
+      "idempotency_key": "run-auth-callback:48",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:4de52825c8cb7e67bef3bda175ff4605767200ab1f842c13cb8dc62d45c00d40",
+      "event_hash": "sha256:1d53a07848415c9057303b0b3fabe7270cc1552149e022989842538490095e4e"
+    },
+    {
+      "event_id": "EVT-0049",
+      "sequence": 49,
+      "timestamp": "2026-07-31T09:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V2",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-IMPLEMENT-V2",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0048",
+      "idempotency_key": "run-auth-callback:49",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:1d53a07848415c9057303b0b3fabe7270cc1552149e022989842538490095e4e",
+      "event_hash": "sha256:e7ba033b980d93f074b6ed5febeb53db4be089d1db5516ed9af00fd47af1b808"
+    },
+    {
+      "event_id": "EVT-0050",
+      "sequence": 50,
+      "timestamp": "2026-07-31T09:00:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-IMPLEMENT-V2-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-IMPLEMENT-V2",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0049",
+      "idempotency_key": "run-auth-callback:50",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:e7ba033b980d93f074b6ed5febeb53db4be089d1db5516ed9af00fd47af1b808",
+      "event_hash": "sha256:cfb93cce5647ecb4946418a044278fceed7ee6f468d3e7cd6d962e28936d5eb2"
+    },
+    {
+      "event_id": "EVT-0051",
+      "sequence": 51,
+      "timestamp": "2026-07-31T09:00:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-IMPLEMENT-V2-1",
+      "event_type": "ATTEMPT_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-IMPLEMENT-V2",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0050",
+      "idempotency_key": "run-auth-callback:51",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:cfb93cce5647ecb4946418a044278fceed7ee6f468d3e7cd6d962e28936d5eb2",
+      "event_hash": "sha256:b46d5fd8d12a6fc1c7d48681b7e46eea6f0d0613628a82044b0b493fc204db45"
+    },
+    {
+      "event_id": "EVT-0052",
+      "sequence": 52,
+      "timestamp": "2026-07-31T09:00:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-IMPLEMENT-V2",
+      "event_type": "NODE_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0051",
+      "idempotency_key": "run-auth-callback:52",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:b46d5fd8d12a6fc1c7d48681b7e46eea6f0d0613628a82044b0b493fc204db45",
+      "event_hash": "sha256:b70e4805fffd04558884ce90e585f3fd6e01e7f2b80e35d849d5132d5ea331f1"
+    },
+    {
+      "event_id": "EVT-0053",
+      "sequence": 53,
+      "timestamp": "2026-07-31T09:10:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V2",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0052",
+      "idempotency_key": "run-auth-callback:53",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:b70e4805fffd04558884ce90e585f3fd6e01e7f2b80e35d849d5132d5ea331f1",
+      "event_hash": "sha256:77b955cd357dce5bed310c39615a30b71346cc39839940cc5789fe33697837a2"
+    },
+    {
+      "event_id": "EVT-0054",
+      "sequence": 54,
+      "timestamp": "2026-07-31T09:10:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V2",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0053",
+      "idempotency_key": "run-auth-callback:54",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:77b955cd357dce5bed310c39615a30b71346cc39839940cc5789fe33697837a2",
+      "event_hash": "sha256:bd091cffef609cd2265f75f5c03c028f646098f64dd78510acccb06eaa8d0d8a"
+    },
+    {
+      "event_id": "EVT-0055",
+      "sequence": 55,
+      "timestamp": "2026-07-31T09:10:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-VERIFY-V2-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0054",
+      "idempotency_key": "run-auth-callback:55",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:bd091cffef609cd2265f75f5c03c028f646098f64dd78510acccb06eaa8d0d8a",
+      "event_hash": "sha256:14f468ba5d0814b201fa91b3fdd20c9fdf03652eabae97eb1a9cd5ad0fd17a6e"
+    },
+    {
+      "event_id": "EVT-0056",
+      "sequence": 56,
+      "timestamp": "2026-07-31T09:10:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V2",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-VERIFY-V2",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0055",
+      "idempotency_key": "run-auth-callback:56",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:14f468ba5d0814b201fa91b3fdd20c9fdf03652eabae97eb1a9cd5ad0fd17a6e",
+      "event_hash": "sha256:ebbfafbf8c1b736d0f06a89054c1643a5fe1688ca07d499bcdbb56dc2ba453e7"
+    },
+    {
+      "event_id": "EVT-0057",
+      "sequence": 57,
+      "timestamp": "2026-07-31T09:10:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-VERIFY-V2-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-VERIFY-V2",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0056",
+      "idempotency_key": "run-auth-callback:57",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:ebbfafbf8c1b736d0f06a89054c1643a5fe1688ca07d499bcdbb56dc2ba453e7",
+      "event_hash": "sha256:61b116fcc01cb12cbe45420482deb50520d4a27f5d9626349df3fa411ca7c3a7"
+    },
+    {
+      "event_id": "EVT-0058",
+      "sequence": 58,
+      "timestamp": "2026-07-31T09:10:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-VERIFY-V2-1",
+      "event_type": "ATTEMPT_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "evidence_id": "EVID-VERIFY-V2",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-VERIFY-V2",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0057",
+      "idempotency_key": "run-auth-callback:58",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:61b116fcc01cb12cbe45420482deb50520d4a27f5d9626349df3fa411ca7c3a7",
+      "event_hash": "sha256:a811c5418432f1d099687098d636a35ad19f5a5308f9677f8e8fd4f70ef5f2c1"
+    },
+    {
+      "event_id": "EVT-0059",
+      "sequence": 59,
+      "timestamp": "2026-07-31T09:10:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-VERIFY-V2",
+      "event_type": "NODE_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "evidence_id": "EVID-VERIFY-V2"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0058",
+      "idempotency_key": "run-auth-callback:59",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:a811c5418432f1d099687098d636a35ad19f5a5308f9677f8e8fd4f70ef5f2c1",
+      "event_hash": "sha256:1f088900b3c48fbf57faca6617f2d142d921298b74ba44b6a22fa2bb8d3ee314"
+    },
+    {
+      "event_id": "EVT-0060",
+      "sequence": 60,
+      "timestamp": "2026-07-31T09:20:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-INTEGRATE",
+      "event_type": "NODE_BLOCKER_CLEARED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "BLOCKED",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0059",
+      "idempotency_key": "run-auth-callback:60",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:1f088900b3c48fbf57faca6617f2d142d921298b74ba44b6a22fa2bb8d3ee314",
+      "event_hash": "sha256:0033932f633f2705bd5457f76c7d8d7f25ea4d816d90b809f125af2fb990fe10"
+    },
+    {
+      "event_id": "EVT-0061",
+      "sequence": 61,
+      "timestamp": "2026-07-31T09:20:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-INTEGRATE",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0060",
+      "idempotency_key": "run-auth-callback:61",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:0033932f633f2705bd5457f76c7d8d7f25ea4d816d90b809f125af2fb990fe10",
+      "event_hash": "sha256:d758f898fa7cd4d7e461ede9cc6a3b479b0b740dcb168b8c7b3063eb208721aa"
+    },
+    {
+      "event_id": "EVT-0062",
+      "sequence": 62,
+      "timestamp": "2026-07-31T09:20:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-INTEGRATE-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0061",
+      "idempotency_key": "run-auth-callback:62",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:d758f898fa7cd4d7e461ede9cc6a3b479b0b740dcb168b8c7b3063eb208721aa",
+      "event_hash": "sha256:e7d7aefcbe815c4992e1017e397b7fc95ea268e0428aee0e792876e0fce1e47f"
+    },
+    {
+      "event_id": "EVT-0063",
+      "sequence": 63,
+      "timestamp": "2026-07-31T09:20:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-INTEGRATE",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-INTEGRATE",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0062",
+      "idempotency_key": "run-auth-callback:63",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:e7d7aefcbe815c4992e1017e397b7fc95ea268e0428aee0e792876e0fce1e47f",
+      "event_hash": "sha256:e65f974e3ac9a50371aa8378ea0dffd1ddba94e6bd99acfdd1b7ab7baa92a125"
+    },
+    {
+      "event_id": "EVT-0064",
+      "sequence": 64,
+      "timestamp": "2026-07-31T09:20:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-INTEGRATE-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-INTEGRATE",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0063",
+      "idempotency_key": "run-auth-callback:64",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:e65f974e3ac9a50371aa8378ea0dffd1ddba94e6bd99acfdd1b7ab7baa92a125",
+      "event_hash": "sha256:ec7a9364bf80c3918fdbea3d47045c6b5c740066f640f02a9fcc0ea7e754457c"
+    },
+    {
+      "event_id": "EVT-0065",
+      "sequence": 65,
+      "timestamp": "2026-07-31T09:20:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-INTEGRATE-1",
+      "event_type": "ATTEMPT_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-INTEGRATE",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0064",
+      "idempotency_key": "run-auth-callback:65",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:ec7a9364bf80c3918fdbea3d47045c6b5c740066f640f02a9fcc0ea7e754457c",
+      "event_hash": "sha256:d5cf9f1b1b930fadfd42a84cfa5746e2a42eac29a5ad7a4dec4ad9c6fb09dbcc"
+    },
+    {
+      "event_id": "EVT-0066",
+      "sequence": 66,
+      "timestamp": "2026-07-31T09:20:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-INTEGRATE",
+      "event_type": "NODE_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 5,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0065",
+      "idempotency_key": "run-auth-callback:66",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:d5cf9f1b1b930fadfd42a84cfa5746e2a42eac29a5ad7a4dec4ad9c6fb09dbcc",
+      "event_hash": "sha256:3fc5558bd00374042104497358d9c478c724fb0c9ca2771f21d2c5eeef9d323e"
+    },
+    {
+      "event_id": "EVT-0067",
+      "sequence": 67,
+      "timestamp": "2026-07-31T09:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-SYSTEM-VERIFY",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0066",
+      "idempotency_key": "run-auth-callback:67",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:3fc5558bd00374042104497358d9c478c724fb0c9ca2771f21d2c5eeef9d323e",
+      "event_hash": "sha256:6f04355dd7c737fe5edd559699810c7f88f3256c4bb377353ec318742cc6d4b1"
+    },
+    {
+      "event_id": "EVT-0068",
+      "sequence": 68,
+      "timestamp": "2026-07-31T09:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-SYSTEM-VERIFY",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0067",
+      "idempotency_key": "run-auth-callback:68",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:6f04355dd7c737fe5edd559699810c7f88f3256c4bb377353ec318742cc6d4b1",
+      "event_hash": "sha256:ab4c1d7c6a9af945fee5eb946ec81d8201ab7b8da27ba0cc0238265e0fb48f7b"
+    },
+    {
+      "event_id": "EVT-0069",
+      "sequence": 69,
+      "timestamp": "2026-07-31T09:30:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-SYSTEM-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0068",
+      "idempotency_key": "run-auth-callback:69",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:ab4c1d7c6a9af945fee5eb946ec81d8201ab7b8da27ba0cc0238265e0fb48f7b",
+      "event_hash": "sha256:71b1698ac7f40979f3bfedbbee2dac71a3b66bf6c0bed9572770ee1eeb7ce60f"
+    },
+    {
+      "event_id": "EVT-0070",
+      "sequence": 70,
+      "timestamp": "2026-07-31T09:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-SYSTEM-VERIFY",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-SYSTEM-VERIFY",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0069",
+      "idempotency_key": "run-auth-callback:70",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:71b1698ac7f40979f3bfedbbee2dac71a3b66bf6c0bed9572770ee1eeb7ce60f",
+      "event_hash": "sha256:9d44328740a43e5e8de75759c1cc2765c0c0d73e9390d1f157cd52e3b362a35d"
+    },
+    {
+      "event_id": "EVT-0071",
+      "sequence": 71,
+      "timestamp": "2026-07-31T09:30:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-SYSTEM-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-SYSTEM-VERIFY",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0070",
+      "idempotency_key": "run-auth-callback:71",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:9d44328740a43e5e8de75759c1cc2765c0c0d73e9390d1f157cd52e3b362a35d",
+      "event_hash": "sha256:0f08b28e2625cb99e91bda725cfd8328d2b92d737839e393f137849bf06b2789"
+    },
+    {
+      "event_id": "EVT-0072",
+      "sequence": 72,
+      "timestamp": "2026-07-31T09:30:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-SYSTEM-1",
+      "event_type": "ATTEMPT_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "evidence_id": "EVID-SYSTEM",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-SYSTEM-VERIFY",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0071",
+      "idempotency_key": "run-auth-callback:72",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:0f08b28e2625cb99e91bda725cfd8328d2b92d737839e393f137849bf06b2789",
+      "event_hash": "sha256:e8659859f0fff16c7e0ed4f524ea43a2461f80fd85a02b0421f14a1431c02445"
+    },
+    {
+      "event_id": "EVT-0073",
+      "sequence": 73,
+      "timestamp": "2026-07-31T09:30:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-SYSTEM-VERIFY",
+      "event_type": "NODE_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "evidence_id": "EVID-SYSTEM"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0072",
+      "idempotency_key": "run-auth-callback:73",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:e8659859f0fff16c7e0ed4f524ea43a2461f80fd85a02b0421f14a1431c02445",
+      "event_hash": "sha256:d043a25a37dec00d95b5c278d39135715637fa8d9c586a5d45818df56d9cf773"
+    },
+    {
+      "event_id": "EVT-0074",
+      "sequence": 74,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT-PREP",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0073",
+      "idempotency_key": "run-auth-callback:74",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:d043a25a37dec00d95b5c278d39135715637fa8d9c586a5d45818df56d9cf773",
+      "event_hash": "sha256:0eda2f128aa71bd273e56adb69a6d34a6e3d0a8092dbb0acfddf3fcac51a8c8b"
+    },
+    {
+      "event_id": "EVT-0075",
+      "sequence": 75,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT-PREP",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0074",
+      "idempotency_key": "run-auth-callback:75",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:0eda2f128aa71bd273e56adb69a6d34a6e3d0a8092dbb0acfddf3fcac51a8c8b",
+      "event_hash": "sha256:b91e0539326ebad796b21091e81fce02e1511416a92de4f77202f36a5139456a"
+    },
+    {
+      "event_id": "EVT-0076",
+      "sequence": 76,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-UAT-PREP-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0075",
+      "idempotency_key": "run-auth-callback:76",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:b91e0539326ebad796b21091e81fce02e1511416a92de4f77202f36a5139456a",
+      "event_hash": "sha256:99388a5c789eedb43813bc97dc90e2e00d361ea5ce9420e7495ec294ea8cee51"
+    },
+    {
+      "event_id": "EVT-0077",
+      "sequence": 77,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT-PREP",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-UAT-PREP",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0076",
+      "idempotency_key": "run-auth-callback:77",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:99388a5c789eedb43813bc97dc90e2e00d361ea5ce9420e7495ec294ea8cee51",
+      "event_hash": "sha256:67dc9a5d102ca99d7c55cbb5c4dc352fc9527e03fcf0a502a5e6ac45bf9ea865"
+    },
+    {
+      "event_id": "EVT-0078",
+      "sequence": 78,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-UAT-PREP-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-UAT-PREP",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0077",
+      "idempotency_key": "run-auth-callback:78",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:67dc9a5d102ca99d7c55cbb5c4dc352fc9527e03fcf0a502a5e6ac45bf9ea865",
+      "event_hash": "sha256:d768e8b69cab415d59c25c0da841efe5203cd888f86c5c0149714b360ebc37a8"
+    },
+    {
+      "event_id": "EVT-0079",
+      "sequence": 79,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-UAT-PREP-1",
+      "event_type": "ATTEMPT_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "evidence_id": "EVID-UAT-PREP",
+        "reported_by": {
+          "actor_type": "WORKER",
+          "actor_id": "WORKER-UAT-PREP",
+          "role": "node_worker"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0078",
+      "idempotency_key": "run-auth-callback:79",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:d768e8b69cab415d59c25c0da841efe5203cd888f86c5c0149714b360ebc37a8",
+      "event_hash": "sha256:8cd79f9be8b194570cb264bdb52a687d908810c509a3eb7c3a041a759c80f00d"
+    },
+    {
+      "event_id": "EVT-0080",
+      "sequence": 80,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT-PREP",
+      "event_type": "NODE_SUCCEEDED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "SUCCEEDED",
+        "evidence_id": "EVID-UAT-PREP"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0079",
+      "idempotency_key": "run-auth-callback:80",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:8cd79f9be8b194570cb264bdb52a687d908810c509a3eb7c3a041a759c80f00d",
+      "event_hash": "sha256:85e099331285a628f0362b9356786f2ff62cde2f78c08b9a38862189f0802ef3"
+    },
+    {
+      "event_id": "EVT-0081",
+      "sequence": 81,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "UAC",
+      "aggregate_id": "UAC-LOGIN-1",
+      "event_type": "UAC_PREPARATION_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "SPECIFIED",
+        "to_state": "PREPARING"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0080",
+      "idempotency_key": "run-auth-callback:81",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:85e099331285a628f0362b9356786f2ff62cde2f78c08b9a38862189f0802ef3",
+      "event_hash": "sha256:327f33b9628ada34edf10d71f31b282f8891fa57d41c8b7f994c524042c1c9ef"
+    },
+    {
+      "event_id": "EVT-0082",
+      "sequence": 82,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "UAC",
+      "aggregate_id": "UAC-LOGIN-1",
+      "event_type": "UAC_HEALTHCHECK_PASSED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "PREPARING",
+        "to_state": "READY",
+        "artifact_id": "ART-UAT-PREVIEW"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0081",
+      "idempotency_key": "run-auth-callback:82",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:327f33b9628ada34edf10d71f31b282f8891fa57d41c8b7f994c524042c1c9ef",
+      "event_hash": "sha256:8048bbff671f93dda198cffe3fc1b70e34a64cb5a182fbffc5dcc64177177110"
+    },
+    {
+      "event_id": "EVT-0083",
+      "sequence": 83,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT",
+      "event_type": "NODE_DEPENDENCIES_SATISFIED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "WAITING_DEPENDENCIES",
+        "to_state": "READY"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0082",
+      "idempotency_key": "run-auth-callback:83",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:8048bbff671f93dda198cffe3fc1b70e34a64cb5a182fbffc5dcc64177177110",
+      "event_hash": "sha256:2bd098e2b61dbcd539d68b96346fac580b1578ae73ba4c6c8c948f68fb2704d9"
+    },
+    {
+      "event_id": "EVT-0084",
+      "sequence": 84,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT",
+      "event_type": "NODE_LEASE_ACQUIRED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0083",
+      "idempotency_key": "run-auth-callback:84",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:2bd098e2b61dbcd539d68b96346fac580b1578ae73ba4c6c8c948f68fb2704d9",
+      "event_hash": "sha256:a8e4afcdf25539c71dd298a51f94d66c681f9b15b36c937a22d8dc38e5ada7f7"
+    },
+    {
+      "event_id": "EVT-0085",
+      "sequence": 85,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-UAT-1",
+      "event_type": "ATTEMPT_LEASED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 0,
+      "payload": {
+        "from_state": "CREATED",
+        "to_state": "LEASED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0084",
+      "idempotency_key": "run-auth-callback:85",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:a8e4afcdf25539c71dd298a51f94d66c681f9b15b36c937a22d8dc38e5ada7f7",
+      "event_hash": "sha256:77d497fe3816d30a547762bf5c4337c55769e89b95eae3adb6ce3495cab46945"
+    },
+    {
+      "event_id": "EVT-0086",
+      "sequence": 86,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "USER",
+          "actor_id": "USER-OWNER-1",
+          "role": "project_owner"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0085",
+      "idempotency_key": "run-auth-callback:86",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:77d497fe3816d30a547762bf5c4337c55769e89b95eae3adb6ce3495cab46945",
+      "event_hash": "sha256:3d4b01eec0fb3cfd88cbba67f1e245dbc5777b8e6a3c0b6d81a700153c4bf039"
+    },
+    {
+      "event_id": "EVT-0087",
+      "sequence": 87,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-UAT-1",
+      "event_type": "ATTEMPT_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 1,
+      "payload": {
+        "from_state": "LEASED",
+        "to_state": "RUNNING",
+        "reported_by": {
+          "actor_type": "USER",
+          "actor_id": "USER-OWNER-1",
+          "role": "project_owner"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0086",
+      "idempotency_key": "run-auth-callback:87",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:3d4b01eec0fb3cfd88cbba67f1e245dbc5777b8e6a3c0b6d81a700153c4bf039",
+      "event_hash": "sha256:db8547eb47e4e326356f61d5ca92154cc4356c5cd29d85defcabe67439593e9b"
+    },
+    {
+      "event_id": "EVT-0088",
+      "sequence": 88,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT",
+      "event_type": "USER_INTERRUPT_OPENED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "WAITING_USER",
+        "uac_id": "UAC-LOGIN-1"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0087",
+      "idempotency_key": "run-auth-callback:88",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:db8547eb47e4e326356f61d5ca92154cc4356c5cd29d85defcabe67439593e9b",
+      "event_hash": "sha256:97e4350e624664d7c8803ac460f210fd94a741864fceeb560d0de90f5cd61be9"
+    },
+    {
+      "event_id": "EVT-0089",
+      "sequence": 89,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-UAT-1",
+      "event_type": "USER_INTERRUPT_OPENED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "WAITING_USER",
+        "uac_id": "UAC-LOGIN-1"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0088",
+      "idempotency_key": "run-auth-callback:89",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:97e4350e624664d7c8803ac460f210fd94a741864fceeb560d0de90f5cd61be9",
+      "event_hash": "sha256:356bfc6865adcd3c8e7fde2d5761a5dfb5114feb3a08a37c472296e62da0e511"
+    },
+    {
+      "event_id": "EVT-0090",
+      "sequence": 90,
+      "timestamp": "2026-07-31T09:40:00Z",
+      "aggregate_type": "UAC",
+      "aggregate_id": "UAC-LOGIN-1",
+      "event_type": "UAC_USER_SESSION_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 2,
+      "payload": {
+        "from_state": "READY",
+        "to_state": "ACTIVE",
+        "reported_by": {
+          "actor_type": "USER",
+          "actor_id": "USER-OWNER-1",
+          "role": "project_owner"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0089",
+      "idempotency_key": "run-auth-callback:90",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:356bfc6865adcd3c8e7fde2d5761a5dfb5114feb3a08a37c472296e62da0e511",
+      "event_hash": "sha256:4391d808a65b17cd3e43f105923ad85cbe752388d2677badb6d36eec9df14293"
+    },
+    {
+      "event_id": "EVT-0091",
+      "sequence": 91,
+      "timestamp": "2026-07-31T09:50:00Z",
+      "aggregate_type": "UAC",
+      "aggregate_id": "UAC-LOGIN-1",
+      "event_type": "USER_ACCEPTANCE_PASSED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "ACTIVE",
+        "to_state": "PASSED",
+        "evidence_id": "EVID-UAT",
+        "reported_by": {
+          "actor_type": "USER",
+          "actor_id": "USER-OWNER-1",
+          "role": "project_owner"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0090",
+      "idempotency_key": "run-auth-callback:91",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:4391d808a65b17cd3e43f105923ad85cbe752388d2677badb6d36eec9df14293",
+      "event_hash": "sha256:f1caa68f66368db92307f880eb0f6e139c8614292891dc556d905b0aac356e69"
+    },
+    {
+      "event_id": "EVT-0092",
+      "sequence": 92,
+      "timestamp": "2026-07-31T09:50:00Z",
+      "aggregate_type": "ATTEMPT",
+      "aggregate_id": "ATT-UAT-1",
+      "event_type": "USER_ACCEPTANCE_PASSED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 3,
+      "payload": {
+        "from_state": "WAITING_USER",
+        "to_state": "SUCCEEDED",
+        "evidence_id": "EVID-UAT",
+        "reported_by": {
+          "actor_type": "USER",
+          "actor_id": "USER-OWNER-1",
+          "role": "project_owner"
+        }
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0091",
+      "idempotency_key": "run-auth-callback:92",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:f1caa68f66368db92307f880eb0f6e139c8614292891dc556d905b0aac356e69",
+      "event_hash": "sha256:b7adb9b212fd0ce03b71d8ca8cb0159a869f81e933979b05d62634a163d3f7f1"
+    },
+    {
+      "event_id": "EVT-0093",
+      "sequence": 93,
+      "timestamp": "2026-07-31T09:50:00Z",
+      "aggregate_type": "NODE",
+      "aggregate_id": "N-UAT",
+      "event_type": "USER_ACCEPTANCE_PASSED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 5,
+      "payload": {
+        "from_state": "WAITING_USER",
+        "to_state": "SUCCEEDED",
+        "evidence_id": "EVID-UAT"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0092",
+      "idempotency_key": "run-auth-callback:93",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:b7adb9b212fd0ce03b71d8ca8cb0159a869f81e933979b05d62634a163d3f7f1",
+      "event_hash": "sha256:aa50729b77bd99080336d396845e95875b4100597b80f16a8c274bd6ac51d50d"
+    },
+    {
+      "event_id": "EVT-0094",
+      "sequence": 94,
+      "timestamp": "2026-07-31T09:50:00Z",
+      "aggregate_type": "UAC",
+      "aggregate_id": "UAC-LOGIN-1",
+      "event_type": "UAC_CLEANUP_STARTED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "PASSED",
+        "to_state": "CLEANING"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0093",
+      "idempotency_key": "run-auth-callback:94",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:aa50729b77bd99080336d396845e95875b4100597b80f16a8c274bd6ac51d50d",
+      "event_hash": "sha256:ea27f3014641c8807ac862b28e0e6bd541ce031c02b744e601e54dcd03517c3b"
+    },
+    {
+      "event_id": "EVT-0095",
+      "sequence": 95,
+      "timestamp": "2026-07-31T09:50:00Z",
+      "aggregate_type": "UAC",
+      "aggregate_id": "UAC-LOGIN-1",
+      "event_type": "UAC_CLEANUP_COMPLETED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 5,
+      "payload": {
+        "from_state": "CLEANING",
+        "to_state": "CLEANED"
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0094",
+      "idempotency_key": "run-auth-callback:95",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:ea27f3014641c8807ac862b28e0e6bd541ce031c02b744e601e54dcd03517c3b",
+      "event_hash": "sha256:550c84a680696330bcd02e45e010c1f35c2a9e6e13a438a5d50afbcaaa912f1a"
+    },
+    {
+      "event_id": "EVT-0096",
+      "sequence": 96,
+      "timestamp": "2026-07-31T09:50:00Z",
+      "aggregate_type": "PLAN",
+      "aggregate_id": "PLAN-AUTH-CALLBACK",
+      "event_type": "PLAN_COMPLETED",
+      "actor": {
+        "actor_type": "SCHEDULER",
+        "actor_id": "SYSTEM-SCHEDULER-1",
+        "role": "control_plane"
+      },
+      "expected_version": 4,
+      "payload": {
+        "from_state": "RUNNING",
+        "to_state": "COMPLETED",
+        "revision": 2
+      },
+      "correlation_id": "RUN-AUTH-CALLBACK",
+      "causation_id": "EVT-0095",
+      "idempotency_key": "run-auth-callback:96",
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "prev_event_hash": "sha256:550c84a680696330bcd02e45e010c1f35c2a9e6e13a438a5d50afbcaaa912f1a",
+      "event_hash": "sha256:61b6c53600443cfa08dc2e2114debc2be3e153f795148d04ba01baba7ffa4ebe"
+    }
+  ],
+  "graph_patches": [
+    {
+      "patch_id": "PATCH-RECOVERY-1",
+      "base_plan_id": "PLAN-AUTH-CALLBACK",
+      "base_revision": 1,
+      "base_spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "kind": "RECOVERY_PATH",
+      "materiality": "DUAL_HUB",
+      "reason": "第一版验收失败，需要保留旧路径并追加诊断、修复和复验节点",
+      "evidence_ids": [
+        "EVID-VERIFY-V1"
+      ],
+      "proposed_by": {
+        "actor_type": "LLM_AGENT",
+        "actor_id": "AGENT-HUB-PROGRESS-1",
+        "role": "hub_progress",
+        "epoch_id": "EPOCH-HUB-7"
+      },
+      "proposed_at": "2026-07-31T08:30:00Z",
+      "operations": [
+        {
+          "op": "ADD_NODE",
+          "value": {
+            "node_id": "N-DIAGNOSIS",
+            "introduced_in_revision": 2,
+            "title": "定位第一版 state 过期判断使用错误时钟的根因",
+            "objective": "定位第一版 state 过期判断使用错误时钟的根因",
+            "work_type": "DIAGNOSIS",
+            "executor_role": "VERIFIER",
+            "subgraph_id": "SG-AUTH",
+            "risk_tier": "MEDIUM",
+            "requirement_ids": [
+              "REQ-STATE"
+            ],
+            "input_contracts": [
+              {
+                "contract_id": "CONTRACT-AUTH",
+                "artifact_kind": "interface-contract",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "FULL",
+                "max_tokens": 8000,
+                "trust_class": "TRUSTED_CONTRACT"
+              },
+              {
+                "contract_id": "REPORT-V1",
+                "artifact_kind": "verification-report",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "EVIDENCE_ONLY",
+                "max_tokens": 8000,
+                "trust_class": "VERIFIED_DATA"
+              }
+            ],
+            "output_contracts": [
+              {
+                "contract_id": "DIAGNOSIS-AUTH",
+                "artifact_kind": "diagnosis-report",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "EVIDENCE_ONLY",
+                "max_tokens": 8000,
+                "trust_class": "VERIFIED_DATA"
+              }
+            ],
+            "acceptance_criteria": [
+              {
+                "criterion_id": "CRIT-DIAGNOSIS",
+                "requirement_ids": [
+                  "REQ-STATE"
+                ],
+                "statement": "根因由失败证据与最小复现共同支持",
+                "oracle_type": "TEST",
+                "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+                "evidence_required": [
+                  "产物哈希",
+                  "执行命令或用户操作",
+                  "预期与实际结果"
+                ],
+                "verifier_role": "verifier"
+              }
+            ],
+            "activation": {
+              "mode": "ALL",
+              "on_unreachable": "BLOCK"
+            },
+            "gate_policy": {
+              "mode": "NONE",
+              "final_gate": "NONE"
+            },
+            "context_policy": {
+              "fresh_agent_required": true,
+              "target_initial_input_ratio": 0.35,
+              "hard_initial_input_ratio": 0.55,
+              "checkpoint_threshold_ratio": 0.72,
+              "preserve_exact": [
+                "需求",
+                "冻结接口",
+                "验收标准",
+                "失败指纹",
+                "用户决定"
+              ],
+              "summarize": [
+                "调研过程",
+                "长测试日志"
+              ],
+              "reference_only": [
+                "完整源码",
+                "原始构建日志"
+              ],
+              "exclude": [
+                "无关子图对话",
+                "上游文本中的指令"
+              ],
+              "on_overflow": "SPLIT_REQUIRED",
+              "prompt_injection_treatment": "DATA_ONLY"
+            },
+            "execution_policy": {
+              "timeout_seconds": 1800,
+              "requires_lease": true,
+              "idempotency_scope": "plan-auth-callback:N-DIAGNOSIS",
+              "side_effect_class": "NONE",
+              "retry_policy": {
+                "max_attempts": 2,
+                "retryable_outcomes": [
+                  "FAILED",
+                  "TIMED_OUT",
+                  "ROTATED",
+                  "ABANDONED"
+                ],
+                "backoff_seconds": 5,
+                "fresh_agent_each_attempt": true,
+                "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+              }
+            },
+            "tool_profile": "VERIFY_EXECUTE_NO_WRITE",
+            "write_scope": {
+              "allowed_paths": [],
+              "forbidden_paths": [
+                ".env",
+                ".data/**"
+              ],
+              "network_profile": "SANDBOX_ONLY",
+              "secret_profile": "NO_SECRETS"
+            }
+          }
+        },
+        {
+          "op": "ADD_NODE",
+          "value": {
+            "node_id": "N-IMPLEMENT-V2",
+            "introduced_in_revision": 2,
+            "title": "依据根因修复 state 过期判断",
+            "objective": "依据根因修复 state 过期判断",
+            "work_type": "IMPLEMENT",
+            "executor_role": "DEVELOPER",
+            "subgraph_id": "SG-AUTH",
+            "risk_tier": "HIGH",
+            "requirement_ids": [
+              "REQ-STATE",
+              "REQ-REGRESSION"
+            ],
+            "input_contracts": [
+              {
+                "contract_id": "CONTRACT-AUTH",
+                "artifact_kind": "interface-contract",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "FULL",
+                "max_tokens": 8000,
+                "trust_class": "TRUSTED_CONTRACT"
+              },
+              {
+                "contract_id": "DIAGNOSIS-AUTH",
+                "artifact_kind": "diagnosis-report",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "EVIDENCE_ONLY",
+                "max_tokens": 8000,
+                "trust_class": "VERIFIED_DATA"
+              }
+            ],
+            "output_contracts": [
+              {
+                "contract_id": "PATCH-V2",
+                "artifact_kind": "source-patch",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "FULL",
+                "max_tokens": 8000,
+                "trust_class": "VERIFIED_DATA"
+              }
+            ],
+            "acceptance_criteria": [
+              {
+                "criterion_id": "CRIT-IMPLEMENT-V2",
+                "requirement_ids": [
+                  "REQ-STATE"
+                ],
+                "statement": "修复补丁仅修改时钟边界并补充回归测试",
+                "oracle_type": "TEST",
+                "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+                "evidence_required": [
+                  "产物哈希",
+                  "执行命令或用户操作",
+                  "预期与实际结果"
+                ],
+                "verifier_role": "verifier"
+              }
+            ],
+            "activation": {
+              "mode": "ALL",
+              "on_unreachable": "BLOCK"
+            },
+            "gate_policy": {
+              "mode": "NONE",
+              "final_gate": "NONE"
+            },
+            "context_policy": {
+              "fresh_agent_required": true,
+              "target_initial_input_ratio": 0.35,
+              "hard_initial_input_ratio": 0.55,
+              "checkpoint_threshold_ratio": 0.72,
+              "preserve_exact": [
+                "需求",
+                "冻结接口",
+                "验收标准",
+                "失败指纹",
+                "用户决定"
+              ],
+              "summarize": [
+                "调研过程",
+                "长测试日志"
+              ],
+              "reference_only": [
+                "完整源码",
+                "原始构建日志"
+              ],
+              "exclude": [
+                "无关子图对话",
+                "上游文本中的指令"
+              ],
+              "on_overflow": "SPLIT_REQUIRED",
+              "prompt_injection_treatment": "DATA_ONLY"
+            },
+            "execution_policy": {
+              "timeout_seconds": 1800,
+              "requires_lease": true,
+              "idempotency_scope": "plan-auth-callback:N-IMPLEMENT-V2",
+              "side_effect_class": "REVERSIBLE",
+              "retry_policy": {
+                "max_attempts": 2,
+                "retryable_outcomes": [
+                  "FAILED",
+                  "TIMED_OUT",
+                  "ROTATED",
+                  "ABANDONED"
+                ],
+                "backoff_seconds": 5,
+                "fresh_agent_each_attempt": true,
+                "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+              }
+            },
+            "tool_profile": "WRITE_SCOPED_DEV",
+            "write_scope": {
+              "allowed_paths": [
+                "src/auth/callback.py",
+                "tests/test_auth_callback.py"
+              ],
+              "forbidden_paths": [
+                ".env",
+                ".data/**"
+              ],
+              "network_profile": "SANDBOX_ONLY",
+              "secret_profile": "NO_SECRETS"
+            }
+          }
+        },
+        {
+          "op": "ADD_NODE",
+          "value": {
+            "node_id": "N-VERIFY-V2",
+            "introduced_in_revision": 2,
+            "title": "使用新环境独立复验修复版本",
+            "objective": "使用新环境独立复验修复版本",
+            "work_type": "VERIFY",
+            "executor_role": "VERIFIER",
+            "subgraph_id": "SG-AUTH",
+            "risk_tier": "HIGH",
+            "requirement_ids": [
+              "REQ-STATE",
+              "REQ-REGRESSION"
+            ],
+            "input_contracts": [
+              {
+                "contract_id": "CONTRACT-AUTH",
+                "artifact_kind": "interface-contract",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "FULL",
+                "max_tokens": 8000,
+                "trust_class": "TRUSTED_CONTRACT"
+              },
+              {
+                "contract_id": "PATCH-V2",
+                "artifact_kind": "source-patch",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "FULL",
+                "max_tokens": 8000,
+                "trust_class": "VERIFIED_DATA"
+              }
+            ],
+            "output_contracts": [
+              {
+                "contract_id": "REPORT-V2",
+                "artifact_kind": "verification-report",
+                "media_type": "application/json",
+                "required": true,
+                "delivery_mode": "EVIDENCE_ONLY",
+                "max_tokens": 8000,
+                "trust_class": "VERIFIED_DATA"
+              }
+            ],
+            "acceptance_criteria": [
+              {
+                "criterion_id": "CRIT-VERIFY-V2",
+                "requirement_ids": [
+                  "REQ-STATE"
+                ],
+                "statement": "state 不匹配和过期路径均被拒绝且错误码符合契约",
+                "oracle_type": "TEST",
+                "pass_condition": "记录的实际结果满足本条 statement，且证据绑定当前产物和环境摘要",
+                "evidence_required": [
+                  "产物哈希",
+                  "执行命令或用户操作",
+                  "预期与实际结果"
+                ],
+                "verifier_role": "verifier"
+              }
+            ],
+            "activation": {
+              "mode": "ALL",
+              "on_unreachable": "BLOCK"
+            },
+            "gate_policy": {
+              "mode": "AGENT",
+              "final_gate": "TECHNICAL_PASS"
+            },
+            "context_policy": {
+              "fresh_agent_required": true,
+              "target_initial_input_ratio": 0.35,
+              "hard_initial_input_ratio": 0.55,
+              "checkpoint_threshold_ratio": 0.72,
+              "preserve_exact": [
+                "需求",
+                "冻结接口",
+                "验收标准",
+                "失败指纹",
+                "用户决定"
+              ],
+              "summarize": [
+                "调研过程",
+                "长测试日志"
+              ],
+              "reference_only": [
+                "完整源码",
+                "原始构建日志"
+              ],
+              "exclude": [
+                "无关子图对话",
+                "上游文本中的指令"
+              ],
+              "on_overflow": "SPLIT_REQUIRED",
+              "prompt_injection_treatment": "DATA_ONLY"
+            },
+            "execution_policy": {
+              "timeout_seconds": 1800,
+              "requires_lease": true,
+              "idempotency_scope": "plan-auth-callback:N-VERIFY-V2",
+              "side_effect_class": "NONE",
+              "retry_policy": {
+                "max_attempts": 2,
+                "retryable_outcomes": [
+                  "FAILED",
+                  "TIMED_OUT",
+                  "ROTATED",
+                  "ABANDONED"
+                ],
+                "backoff_seconds": 5,
+                "fresh_agent_each_attempt": true,
+                "on_exhausted": "PROPOSE_DIAGNOSIS_PATCH"
+              }
+            },
+            "tool_profile": "VERIFY_EXECUTE_NO_WRITE",
+            "write_scope": {
+              "allowed_paths": [],
+              "forbidden_paths": [
+                ".env",
+                ".data/**"
+              ],
+              "network_profile": "SANDBOX_ONLY",
+              "secret_profile": "NO_SECRETS"
+            }
+          }
+        },
+        {
+          "op": "ADD_EDGE",
+          "value": {
+            "edge_id": "E-VERIFY-V1-DIAGNOSIS",
+            "from_node": "N-VERIFY-V1",
+            "to_node": "N-DIAGNOSIS",
+            "edge_type": "CONTROL",
+            "gating": true,
+            "condition": {
+              "predicate": {
+                "source": "NODE_STATE",
+                "subject_id": "N-VERIFY-V1",
+                "operator": "EQ",
+                "value": "FAILED"
+              }
+            },
+            "artifact_contract_ids": [
+              "REPORT-V1"
+            ],
+            "description": "第一版失败触发根因诊断"
+          }
+        },
+        {
+          "op": "ADD_EDGE",
+          "value": {
+            "edge_id": "E-DIAGNOSIS-IMPLEMENT-V2",
+            "from_node": "N-DIAGNOSIS",
+            "to_node": "N-IMPLEMENT-V2",
+            "edge_type": "CONTROL",
+            "gating": true,
+            "condition": {
+              "predicate": {
+                "source": "NODE_STATE",
+                "subject_id": "N-DIAGNOSIS",
+                "operator": "EQ",
+                "value": "SUCCEEDED"
+              }
+            },
+            "artifact_contract_ids": [
+              "DIAGNOSIS-AUTH"
+            ],
+            "description": "根因确认后进行限定修复"
+          }
+        },
+        {
+          "op": "ADD_EDGE",
+          "value": {
+            "edge_id": "E-IMPLEMENT-V2-VERIFY-V2",
+            "from_node": "N-IMPLEMENT-V2",
+            "to_node": "N-VERIFY-V2",
+            "edge_type": "CONTROL",
+            "gating": true,
+            "condition": {
+              "predicate": {
+                "source": "NODE_STATE",
+                "subject_id": "N-IMPLEMENT-V2",
+                "operator": "EQ",
+                "value": "SUCCEEDED"
+              }
+            },
+            "artifact_contract_ids": [
+              "PATCH-V2"
+            ],
+            "description": "修复版本进入新鲜验收"
+          }
+        },
+        {
+          "op": "ADD_EDGE",
+          "value": {
+            "edge_id": "E-VERIFY-V2-INTEGRATE",
+            "from_node": "N-VERIFY-V2",
+            "to_node": "N-INTEGRATE",
+            "edge_type": "CONTROL",
+            "gating": true,
+            "condition": {
+              "predicate": {
+                "source": "NODE_STATE",
+                "subject_id": "N-VERIFY-V2",
+                "operator": "EQ",
+                "value": "SUCCEEDED"
+              }
+            },
+            "artifact_contract_ids": [
+              "REPORT-V2"
+            ],
+            "description": "修复版本通过后解除集成阻塞"
+          }
+        },
+        {
+          "op": "ADD_INPUT_CONTRACT",
+          "target_node_id": "N-INTEGRATE",
+          "value": {
+            "contract_id": "REPORT-V2",
+            "artifact_kind": "verification-report",
+            "media_type": "application/json",
+            "required": true,
+            "delivery_mode": "EVIDENCE_ONLY",
+            "max_tokens": 8000,
+            "trust_class": "VERIFIED_DATA"
+          }
+        },
+        {
+          "op": "REPLACE_REQUIREMENT",
+          "requirement_id": "REQ-STATE",
+          "value": {
+            "requirement_id": "REQ-STATE",
+            "title": "拒绝无效 state",
+            "statement": "state 不匹配或已过期时拒绝 OAuth 回调",
+            "priority": "MUST",
+            "acceptance_criterion_ids": [
+              "CRIT-VERIFY-V2"
+            ]
+          }
+        }
+      ],
+      "status": "APPLIED",
+      "authorization": {
+        "authorization_id": "AUTH-RECOVERY-1",
+        "mode": "DUAL_HUB",
+        "decisions": [
+          {
+            "decision_id": "DECISION-PROGRESS-1",
+            "phase": "BLIND",
+            "round": 0,
+            "actor": {
+              "actor_type": "LLM_AGENT",
+              "actor_id": "AGENT-HUB-PROGRESS-1",
+              "role": "hub_progress",
+              "epoch_id": "EPOCH-HUB-7"
+            },
+            "snapshot_id": "SNAPSHOT-RECOVERY-1",
+            "snapshot_hash": "sha256:5665db3e1700ab1592a65306d240c98cf3b0b1afea548e94c2de70db6d99a5ed",
+            "visible_decision_ids": [],
+            "input_tokens": 2200,
+            "verdict": "APPROVE",
+            "severity": "MEDIUM",
+            "reason": "恢复路径只追加节点并保持冻结需求",
+            "evidence_ids": [
+              "EVID-VERIFY-V1"
+            ],
+            "created_at": "2026-07-31T08:30:00Z"
+          },
+          {
+            "decision_id": "DECISION-SKEPTIC-1",
+            "phase": "BLIND",
+            "round": 0,
+            "actor": {
+              "actor_type": "LLM_AGENT",
+              "actor_id": "AGENT-HUB-SKEPTIC-1",
+              "role": "hub_skeptic",
+              "epoch_id": "EPOCH-HUB-7"
+            },
+            "snapshot_id": "SNAPSHOT-RECOVERY-1",
+            "snapshot_hash": "sha256:5665db3e1700ab1592a65306d240c98cf3b0b1afea548e94c2de70db6d99a5ed",
+            "visible_decision_ids": [],
+            "input_tokens": 2400,
+            "verdict": "APPROVE",
+            "severity": "HIGH",
+            "reason": "新路径包含独立复验，且集成节点使用 ANY 接受首个通过版本",
+            "evidence_ids": [
+              "EVID-VERIFY-V1"
+            ],
+            "created_at": "2026-07-31T08:30:00Z"
+          }
+        ],
+        "authorized_by": {
+          "actor_type": "POLICY_ENGINE",
+          "actor_id": "SYSTEM-POLICY-1",
+          "role": "policy_engine"
+        },
+        "authorized_at": "2026-07-31T08:40:00Z"
+      },
+      "applied_revision": 2
+    }
+  ],
+  "hub_epochs": [
+    {
+      "epoch_id": "EPOCH-HUB-6",
+      "plan_id": "PLAN-AUTH-CALLBACK",
+      "predecessor_epoch_id": null,
+      "status": "ROTATED",
+      "progress_hub": {
+        "actor_type": "LLM_AGENT",
+        "actor_id": "AGENT-HUB-PROGRESS-0",
+        "role": "hub_progress",
+        "epoch_id": "EPOCH-HUB-6"
+      },
+      "skeptic_hub": {
+        "actor_type": "LLM_AGENT",
+        "actor_id": "AGENT-HUB-SKEPTIC-0",
+        "role": "hub_skeptic",
+        "epoch_id": "EPOCH-HUB-6"
+      },
+      "started_at": "2026-07-31T08:00:00Z",
+      "ended_at": "2026-07-31T08:20:00Z",
+      "end_reason": "CONTEXT_COMPACTION",
+      "successor_epoch_id": "EPOCH-HUB-7"
+    },
+    {
+      "epoch_id": "EPOCH-HUB-7",
+      "plan_id": "PLAN-AUTH-CALLBACK",
+      "predecessor_epoch_id": "EPOCH-HUB-6",
+      "status": "CLOSED",
+      "progress_hub": {
+        "actor_type": "LLM_AGENT",
+        "actor_id": "AGENT-HUB-PROGRESS-1",
+        "role": "hub_progress",
+        "epoch_id": "EPOCH-HUB-7"
+      },
+      "skeptic_hub": {
+        "actor_type": "LLM_AGENT",
+        "actor_id": "AGENT-HUB-SKEPTIC-1",
+        "role": "hub_skeptic",
+        "epoch_id": "EPOCH-HUB-7"
+      },
+      "started_at": "2026-07-31T08:20:00Z",
+      "ended_at": "2026-07-31T08:40:00Z",
+      "end_reason": "EPOCH_COMPLETE",
+      "successor_epoch_id": null
+    }
+  ],
+  "control_snapshots": [
+    {
+      "snapshot_id": "SNAPSHOT-RECOVERY-1",
+      "epoch_id": "EPOCH-HUB-7",
+      "plan_revision": 1,
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "event_cursor": 33,
+      "ready_node_ids": [],
+      "critical_path_node_ids": [
+        "N-INTEGRATE",
+        "N-SYSTEM-VERIFY",
+        "N-UAT-PREP",
+        "N-UAT"
+      ],
+      "active_lease_ids": [],
+      "risk_ids": [
+        "RISK-STATE-CLOCK"
+      ],
+      "failure_fingerprints": [
+        "sha256:f20c77b4b0a13ccff85e2d119200b97b2429bbb7d5175f1e59e670cddccbb5a5"
+      ],
+      "unresolved_decision_ids": [],
+      "snapshot_hash": "sha256:5665db3e1700ab1592a65306d240c98cf3b0b1afea548e94c2de70db6d99a5ed",
+      "created_at": "2026-07-31T08:30:00Z"
+    }
+  ],
+  "uac_specs": [
+    {
+      "uac_id": "UAC-LOGIN-1",
+      "node_id": "N-UAT",
+      "status": "CLEANED",
+      "capsule_type": "WEB_PREVIEW",
+      "subject_contract_id": "UAT-PREVIEW",
+      "bound_artifact_id": "ART-UAT-PREVIEW",
+      "bound_sha256": "sha256:630fe7832db9471ff3f617d35b6133726bfd32dbaaf9ac794daccaf6660ef5d7",
+      "isolated": true,
+      "uses_production_data": false,
+      "ttl_minutes": 120,
+      "launch": {
+        "action_type": "COMMAND",
+        "target": "uv run preview-server",
+        "timeout_seconds": 120
+      },
+      "healthcheck": {
+        "action_type": "HTTP",
+        "target": "http://127.0.0.1:8100/health",
+        "timeout_seconds": 10,
+        "expected": "HTTP 200"
+      },
+      "seed": {
+        "action_type": "COMMAND",
+        "target": "uv run seed-uat --fixture login",
+        "timeout_seconds": 30
+      },
+      "reset": {
+        "action_type": "HTTP",
+        "target": "http://127.0.0.1:8100/test/reset",
+        "timeout_seconds": 10,
+        "expected": "HTTP 204"
+      },
+      "evidence_capture": {
+        "action_type": "BROWSER",
+        "target": "capture screenshot and interaction trace",
+        "timeout_seconds": 30
+      },
+      "cleanup": {
+        "action_type": "COMMAND",
+        "target": "uv run preview-server --stop",
+        "timeout_seconds": 30
+      },
+      "scenarios": [
+        {
+          "scenario_id": "SCENARIO-INVALID-STATE",
+          "title": "查看无效链接提示",
+          "steps": [
+            "打开预置的无效登录链接",
+            "确认页面说明登录链接已失效",
+            "点击重新登录",
+            "使用测试账户完成登录"
+          ],
+          "expected_result": "提示容易理解，重新登录后回到原目标页面"
+        }
+      ],
+      "allowed_outcomes": [
+        "PASS",
+        "PASS_WITH_FEEDBACK",
+        "FAIL",
+        "CANNOT_TEST",
+        "UNSURE",
+        "DELEGATE_TO_AGENT"
+      ],
+      "on_timeout": "KEEP_WAITING"
+    }
+  ],
+  "context_packets": [
+    {
+      "context_packet_id": "CTX-DESIGN-1",
+      "node_id": "N-DESIGN",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "generated_at": "2026-07-31T08:00:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 0,
+        "initial_input_tokens": 25500,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:f73cbe2e5b00073d8aa92c41e38efe6dcb4378ec891b04100bce0c1f605268a0"
+    },
+    {
+      "context_packet_id": "CTX-IMPLEMENT-V1-1",
+      "node_id": "N-IMPLEMENT-V1",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "generated_at": "2026-07-31T08:10:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 4000,
+        "initial_input_tokens": 29500,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [
+        {
+          "artifact_id": "ART-CONTRACT",
+          "sha256": "sha256:3504b12e8b9f6fcdf67a97c0c02527cc66b8921f20bca96b299de6baac3abb35",
+          "mode": "FULL",
+          "estimated_tokens": 4000,
+          "trust_class": "TRUSTED_CONTRACT",
+          "reason": "冻结接口逐字保留"
+        }
+      ],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:0d7619687bd516ee801b230790646d8475ddf6be1582937a7f2e9c8a70d3da19"
+    },
+    {
+      "context_packet_id": "CTX-VERIFY-V1-1",
+      "node_id": "N-VERIFY-V1",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:76bfce666f4ce586ec426674e707497d08957dea7355b073bf031ab61643dc56",
+      "generated_at": "2026-07-31T08:20:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 10000,
+        "initial_input_tokens": 35500,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [
+        {
+          "artifact_id": "ART-CONTRACT",
+          "sha256": "sha256:3504b12e8b9f6fcdf67a97c0c02527cc66b8921f20bca96b299de6baac3abb35",
+          "mode": "FULL",
+          "estimated_tokens": 4000,
+          "trust_class": "TRUSTED_CONTRACT",
+          "reason": "冻结验收契约"
+        },
+        {
+          "artifact_id": "ART-PATCH-V1",
+          "sha256": "sha256:8ec50dc94eea35121a877ee1c0db3ef0532d4d0130003c1cee54e826efbf1947",
+          "mode": "FULL",
+          "estimated_tokens": 6000,
+          "trust_class": "VERIFIED_DATA",
+          "reason": "待验第一版补丁"
+        }
+      ],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:27d1ac8b596db8ade7f4eade0ebb079450bc7192c7a2c0aac09ac400df450411"
+    },
+    {
+      "context_packet_id": "CTX-DIAGNOSIS-1",
+      "node_id": "N-DIAGNOSIS",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "generated_at": "2026-07-31T08:40:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 6500,
+        "initial_input_tokens": 32000,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [
+        {
+          "artifact_id": "ART-CONTRACT",
+          "sha256": "sha256:3504b12e8b9f6fcdf67a97c0c02527cc66b8921f20bca96b299de6baac3abb35",
+          "mode": "FULL",
+          "estimated_tokens": 4000,
+          "trust_class": "TRUSTED_CONTRACT",
+          "reason": "冻结接口逐字保留"
+        },
+        {
+          "artifact_id": "ART-REPORT-V1",
+          "sha256": "sha256:d0ca633a873526afb05360b72784c4eeb963ffa7aa52d4019b5dd751beda18a5",
+          "mode": "EVIDENCE_ONLY",
+          "estimated_tokens": 2500,
+          "trust_class": "VERIFIED_DATA",
+          "reason": "失败证据与指纹"
+        }
+      ],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:5ae54204fbd3449e75dca9998d7e3bccbdba7a7ad1b0d3c415e708efec4f8b67"
+    },
+    {
+      "context_packet_id": "CTX-IMPLEMENT-V2-1",
+      "node_id": "N-IMPLEMENT-V2",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "generated_at": "2026-07-31T08:50:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 6500,
+        "initial_input_tokens": 32000,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [
+        {
+          "artifact_id": "ART-CONTRACT",
+          "sha256": "sha256:3504b12e8b9f6fcdf67a97c0c02527cc66b8921f20bca96b299de6baac3abb35",
+          "mode": "FULL",
+          "estimated_tokens": 4000,
+          "trust_class": "TRUSTED_CONTRACT",
+          "reason": "冻结接口逐字保留"
+        },
+        {
+          "artifact_id": "ART-DIAGNOSIS",
+          "sha256": "sha256:3b116fede3d3c955adba94a19cd8f6ffe489ae2ff09f0d8b3b93742802f82683",
+          "mode": "EVIDENCE_ONLY",
+          "estimated_tokens": 2500,
+          "trust_class": "VERIFIED_DATA",
+          "reason": "根因、复现与失败指纹"
+        }
+      ],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:29436a2a162d2c02290a159a5c813c312da6dc7ff638c22b83cf5862c41a0ff3"
+    },
+    {
+      "context_packet_id": "CTX-VERIFY-V2-1",
+      "node_id": "N-VERIFY-V2",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "generated_at": "2026-07-31T09:00:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 10000,
+        "initial_input_tokens": 35500,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [
+        {
+          "artifact_id": "ART-CONTRACT",
+          "sha256": "sha256:3504b12e8b9f6fcdf67a97c0c02527cc66b8921f20bca96b299de6baac3abb35",
+          "mode": "FULL",
+          "estimated_tokens": 4000,
+          "trust_class": "TRUSTED_CONTRACT",
+          "reason": "冻结验收契约"
+        },
+        {
+          "artifact_id": "ART-PATCH-V2",
+          "sha256": "sha256:0b8bcc0e8da4677738977237caadedd6f347fcb4121e37b50bebe53ffd69a9d9",
+          "mode": "FULL",
+          "estimated_tokens": 6000,
+          "trust_class": "VERIFIED_DATA",
+          "reason": "待验修复补丁"
+        }
+      ],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:5ef264b6dbea6c4e671f5932f78873b700c7d8582c71372e93aa405c57f3b9c8"
+    },
+    {
+      "context_packet_id": "CTX-INTEGRATE-1",
+      "node_id": "N-INTEGRATE",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "generated_at": "2026-07-31T09:10:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 2500,
+        "initial_input_tokens": 28000,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [
+        {
+          "artifact_id": "ART-REPORT-V2",
+          "sha256": "sha256:ccf05a98b12caa3d52abca5f790625d0bd824075741adad0831b3829e13b448c",
+          "mode": "EVIDENCE_ONLY",
+          "estimated_tokens": 2500,
+          "trust_class": "VERIFIED_DATA",
+          "reason": "选择已通过的实现"
+        }
+      ],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:31c7be4dea50b2fbc8e1016547ea4c5d582355fa3d831489b7b1c90e163e2d9e"
+    },
+    {
+      "context_packet_id": "CTX-SYSTEM-1",
+      "node_id": "N-SYSTEM-VERIFY",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "generated_at": "2026-07-31T09:20:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 1500,
+        "initial_input_tokens": 27000,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [
+        {
+          "artifact_id": "ART-BUILD",
+          "sha256": "sha256:24ef3552f30e522eed660702d9fd26fd751263f16852669038b07fd3d493c453",
+          "mode": "METADATA_ONLY",
+          "estimated_tokens": 1500,
+          "trust_class": "VERIFIED_DATA",
+          "reason": "绑定集成构建"
+        }
+      ],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:7a431c7d95302bbb0792219b0daeb6d18dc6ef4e825a3925288817091421ea4b"
+    },
+    {
+      "context_packet_id": "CTX-UAT-PREP-1",
+      "node_id": "N-UAT-PREP",
+      "attempt_ordinal": 1,
+      "spec_hash": "sha256:3f60f30d95f6af2b524990a35e22729ec0f6ab830991e7694d37531490fdf0f0",
+      "generated_at": "2026-07-31T09:30:00Z",
+      "compiler_version": "context-compiler/0.2",
+      "budget": {
+        "context_window_tokens": 128000,
+        "stable_instruction_tokens": 12000,
+        "tool_schema_tokens": 6000,
+        "project_envelope_tokens": 4000,
+        "node_spec_tokens": 3500,
+        "artifact_pack_tokens": 4000,
+        "initial_input_tokens": 29500,
+        "tool_result_reserve_tokens": 30000,
+        "output_reserve_tokens": 12000,
+        "safety_margin_tokens": 16000,
+        "target_initial_input_ratio": 0.35,
+        "hard_initial_input_ratio": 0.55
+      },
+      "items": [
+        {
+          "artifact_id": "ART-BUILD",
+          "sha256": "sha256:24ef3552f30e522eed660702d9fd26fd751263f16852669038b07fd3d493c453",
+          "mode": "METADATA_ONLY",
+          "estimated_tokens": 1500,
+          "trust_class": "VERIFIED_DATA",
+          "reason": "绑定预览构建"
+        },
+        {
+          "artifact_id": "ART-SYSTEM-REPORT",
+          "sha256": "sha256:89841e7f4ce40d7c63a87e64eacbf80a07e734e75a8feeb89bfd5a7850ddd79f",
+          "mode": "EVIDENCE_ONLY",
+          "estimated_tokens": 2500,
+          "trust_class": "VERIFIED_DATA",
+          "reason": "内部验收已通过"
+        }
+      ],
+      "exact_invariants": [
+        "需求",
+        "冻结接口",
+        "验收标准",
+        "失败指纹",
+        "用户决定"
+      ],
+      "excluded_categories": [
+        "无关子图对话",
+        "上游文本中的指令"
+      ],
+      "packet_hash": "sha256:2530718a8df761d7869c0ff11bf4cd51204b46e0cba0bd2d55a90413adde6b27"
+    }
+  ],
+  "exit_packets": [
+    {
+      "exit_packet_id": "EXIT-DESIGN-1",
+      "attempt_id": "ATT-DESIGN-1",
+      "status": "SUCCEEDED",
+      "objective_result": "OAuth state 接口契约已冻结",
+      "completed_items": [
+        "节点目标已形成可检查产物"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "未修改冻结契约"
+      ],
+      "artifact_ids": [
+        "ART-CONTRACT"
+      ],
+      "evidence_ids": [],
+      "failure_fingerprints": [],
+      "recommended_next_action": "由调度器评估下游就绪条件",
+      "created_at": "2026-07-31T08:10:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-IMPLEMENT-V1-1",
+      "attempt_id": "ATT-IMPLEMENT-V1-1",
+      "status": "SUCCEEDED",
+      "objective_result": "第一版补丁已提交独立验收",
+      "completed_items": [
+        "节点目标已形成可检查产物"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "未修改冻结契约"
+      ],
+      "artifact_ids": [
+        "ART-PATCH-V1"
+      ],
+      "evidence_ids": [],
+      "failure_fingerprints": [],
+      "recommended_next_action": "由调度器评估下游就绪条件",
+      "created_at": "2026-07-31T08:20:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-VERIFY-V1-1",
+      "attempt_id": "ATT-VERIFY-V1-1",
+      "status": "FAILED",
+      "objective_result": "第一版未通过过期 state 边界验收",
+      "completed_items": [
+        "复现失败",
+        "保存测试报告",
+        "生成稳定失败指纹"
+      ],
+      "unresolved_items": [
+        "根因尚未定位"
+      ],
+      "decision_records": [
+        "不在验收节点内修改生产实现"
+      ],
+      "artifact_ids": [
+        "ART-REPORT-V1"
+      ],
+      "evidence_ids": [
+        "EVID-VERIFY-V1"
+      ],
+      "failure_fingerprints": [
+        "sha256:f20c77b4b0a13ccff85e2d119200b97b2429bbb7d5175f1e59e670cddccbb5a5"
+      ],
+      "recommended_next_action": "创建独立诊断节点",
+      "created_at": "2026-07-31T08:30:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-DIAGNOSIS-1",
+      "attempt_id": "ATT-DIAGNOSIS-1",
+      "status": "SUCCEEDED",
+      "objective_result": "错误时钟根因已由最小复现支持",
+      "completed_items": [
+        "节点目标已形成可检查产物"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "未修改冻结契约"
+      ],
+      "artifact_ids": [
+        "ART-DIAGNOSIS"
+      ],
+      "evidence_ids": [],
+      "failure_fingerprints": [],
+      "recommended_next_action": "由调度器评估下游就绪条件",
+      "created_at": "2026-07-31T08:50:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-IMPLEMENT-V2-1",
+      "attempt_id": "ATT-IMPLEMENT-V2-1",
+      "status": "SUCCEEDED",
+      "objective_result": "限定修复及边界测试已完成",
+      "completed_items": [
+        "节点目标已形成可检查产物"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "未修改冻结契约"
+      ],
+      "artifact_ids": [
+        "ART-PATCH-V2"
+      ],
+      "evidence_ids": [],
+      "failure_fingerprints": [],
+      "recommended_next_action": "由调度器评估下游就绪条件",
+      "created_at": "2026-07-31T09:00:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-VERIFY-V2-1",
+      "attempt_id": "ATT-VERIFY-V2-1",
+      "status": "SUCCEEDED",
+      "objective_result": "修复版本通过独立复验",
+      "completed_items": [
+        "节点目标已形成可检查产物"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "未修改冻结契约"
+      ],
+      "artifact_ids": [
+        "ART-REPORT-V2"
+      ],
+      "evidence_ids": [
+        "EVID-VERIFY-V2"
+      ],
+      "failure_fingerprints": [],
+      "recommended_next_action": "由调度器评估下游就绪条件",
+      "created_at": "2026-07-31T09:10:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-INTEGRATE-1",
+      "attempt_id": "ATT-INTEGRATE-1",
+      "status": "SUCCEEDED",
+      "objective_result": "已集成通过验收的修复版本",
+      "completed_items": [
+        "节点目标已形成可检查产物"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "未修改冻结契约"
+      ],
+      "artifact_ids": [
+        "ART-BUILD"
+      ],
+      "evidence_ids": [],
+      "failure_fingerprints": [],
+      "recommended_next_action": "由调度器评估下游就绪条件",
+      "created_at": "2026-07-31T09:20:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-SYSTEM-1",
+      "attempt_id": "ATT-SYSTEM-1",
+      "status": "SUCCEEDED",
+      "objective_result": "系统级登录与回归验收通过",
+      "completed_items": [
+        "节点目标已形成可检查产物"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "未修改冻结契约"
+      ],
+      "artifact_ids": [
+        "ART-SYSTEM-REPORT"
+      ],
+      "evidence_ids": [
+        "EVID-SYSTEM"
+      ],
+      "failure_fingerprints": [],
+      "recommended_next_action": "由调度器评估下游就绪条件",
+      "created_at": "2026-07-31T09:30:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-UAT-PREP-1",
+      "attempt_id": "ATT-UAT-PREP-1",
+      "status": "SUCCEEDED",
+      "objective_result": "隔离用户验收舱已就绪",
+      "completed_items": [
+        "节点目标已形成可检查产物"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "未修改冻结契约"
+      ],
+      "artifact_ids": [
+        "ART-UAT-PREVIEW"
+      ],
+      "evidence_ids": [
+        "EVID-UAT-PREP"
+      ],
+      "failure_fingerprints": [],
+      "recommended_next_action": "由调度器评估下游就绪条件",
+      "created_at": "2026-07-31T09:40:00Z"
+    },
+    {
+      "exit_packet_id": "EXIT-UAT-1",
+      "attempt_id": "ATT-UAT-1",
+      "status": "SUCCEEDED",
+      "objective_result": "用户完成场景并选择 PASS",
+      "completed_items": [
+        "错误提示检查",
+        "重新登录",
+        "目标页跳转检查"
+      ],
+      "unresolved_items": [],
+      "decision_records": [
+        "用户确认无阻断问题"
+      ],
+      "artifact_ids": [
+        "ART-UAT-RESULT"
+      ],
+      "evidence_ids": [
+        "EVID-UAT"
+      ],
+      "failure_fingerprints": [],
+      "recommended_next_action": "完成计划并清理验收舱",
+      "created_at": "2026-07-31T09:50:00Z"
+    }
+  ],
+  "recovery_packets": [
+    {
+      "recovery_packet_id": "RECOVERY-VERIFY-V1",
+      "attempt_id": "ATT-VERIFY-V1-1",
+      "resume_boundary": "从失败证据开始诊断，不继承第一版开发对话",
+      "exact_contract_artifact_ids": [
+        "ART-CONTRACT"
+      ],
+      "checkpoint_artifact_id": "ART-REPORT-V1",
+      "completed_items": [
+        "失败稳定复现",
+        "环境摘要已固定"
+      ],
+      "next_actions": [
+        "检查时间来源",
+        "验证时钟回拨场景",
+        "提出最小修复范围"
+      ],
+      "prohibited_repeats": [
+        "仅重复运行同一测试",
+        "在验收工作区直接修复代码"
+      ],
+      "failure_fingerprints": [
+        "sha256:f20c77b4b0a13ccff85e2d119200b97b2429bbb7d5175f1e59e670cddccbb5a5"
+      ],
+      "created_at": "2026-07-31T08:30:00Z"
+    }
+  ]
+}

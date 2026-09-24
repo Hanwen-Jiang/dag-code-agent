@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+package agentcore;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "agent-harness/proto/agent_core";
+
+service AgentService {
+  // Execute a single task synchronously
+  rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+  
+  // Stream execution results in real-time
+  rpc StreamExecuteTask(ExecuteTaskRequest) returns (stream TaskUpdate);
+  
+  // Check service health status
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  
+  // Discover available tools with capabilities
+  rpc DiscoverTools(DiscoverToolsRequest) returns (DiscoverToolsResponse);
+}
+
+message ExecuteTaskRequest {
+  TaskMetadata metadata = 1;
+  string query = 2;                    // User query or tool call specification
+  google.protobuf.Struct context = 3;  // Execution context
+  ExecutionMode mode = 4;              // sync, async, stream
+  repeated string available_tools = 5; // Tool whitelist
+  AgentConfig config = 6;              // Timeout, budget settings
+}
+
+message TaskMetadata {
+  string session_id = 1;               // Session identifier
+  string user_id = 2;                  // User identifier
+  map<string, string> headers = 3;     // Custom headers for tracing
+  int64 timestamp_ns = 4;              // Unix nanoseconds
+}
+
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED = 0;
+  EXECUTION_MODE_SYNC = 1;             // Wait for completion
+  EXECUTION_MODE_ASYNC = 2;            // Fire and forget
+  EXECUTION_MODE_STREAM = 3;           // SSE streaming
+}
+
+message AgentConfig {
+  int32 max_iterations = 1;            // Maximum thought steps
+  int32 timeout_seconds = 2;           // Hard timeout
+  bool enable_sandbox = 3;             // WASI sandbox enforcement
+  int64 memory_limit_mb = 4;           // Memory cap for tools
+  int32 token_budget = 5;              // Token limit for this request
+}
+
+message ExecuteTaskResponse {
+  TaskStatus status = 1;
+  string output = 2;                   // Final result or error message
+  int32 tokens = 3;                    // Total tokens consumed
+  bool sandbox = 4;                    // Whether WASI was used
+  google.protobuf.Struct metadata = 5; // Additional response data
+}
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_PENDING = 1;
+  TASK_STATUS_RUNNING = 2;
+  TASK_STATUS_COMPLETED = 3;
+  TASK_STATUS_FAILED = 4;
+  TASK_STATUS_TIMED_OUT = 5;
+  TASK_STATUS_PERMISSION_DENIED = 6;
+}
+
+message TaskUpdate {
+  string task_id = 1;
+  int32 iteration = 2;                 // Current step number
+  string tool_name = 3;                // Currently executing tool
+  ToolResult result = 4;               // Intermediate result
+  TaskStatus status = 5;
+}
+
+message ToolResult {
+  bool success = 1;
+  string output = 2;
+  string error = 3;
+  google.protobuf.Struct metadata = 4;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  HealthStatus status = 1;
+  int64 time_ns = 2;
+  int32 version = 3;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_HEALTHY = 1;
+  HEALTH_UNHEALTHY = 2;
+  HEALTH_DEGRADED = 3;
+}
+
+message DiscoverToolsRequest {}
+
+message DiscoverToolsResponse {
+  repeated ToolCapability tools = 1;
+}
+
+message ToolCapability {
+  string id = 1;                       // Unique tool identifier
+  string name = 2;                     // Human-readable name
+  string description = 3;              // Tool capability description
+  string category = 4;                 // code, filesystem, network, shell
+  google.protobuf.Struct input_schema = 5;    // JSON Schema
+  google.protobuf.Struct output_schema = 6;   // JSON Schema
+  repeated string required_permissions = 7;   // Permission requirements
+  int64 estimated_duration_ms = 8;      // Expected runtime
+  bool is_dangerous = 9;                // Security flag
+  RateLimit rate_limit = 14;            // Rate limiting config
+}
+
+message RateLimit {
+  int32 requests_per_minute = 1;        // Max requests per minute
+  int32 tokens_per_minute = 2;          // Token rate limit
+}
+

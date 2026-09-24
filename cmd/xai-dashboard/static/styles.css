@@ -1,0 +1,426 @@
+/* XAI Dashboard Styles */
+
+:root {
+    --primary-color: #3498db;
+    --success-color: #2ecc71;
+    --danger-color: #e74c3c;
+    --warning-color: #f39c12;
+    --info-color: #1abc9c;
+    --dark-bg: #2c3e50;
+    --light-bg: #ecf0f1;
+    --text-primary: #2c3e50;
+    --text-secondary: #7f8c8d;
+    --border-color: #bdc3c7;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background: var(--light-bg);
+    color: var(--text-primary);
+    line-height: 1.6;
+}
+
+.dashboard-container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+/* Header */
+.dashboard-header {
+    background: var(--dark-bg);
+    color: white;
+    padding: 1rem 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.dashboard-header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+.header-controls {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+}
+
+.status-indicator {
+    padding: 0.25rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.status-indicator.connected {
+    background: var(--success-color);
+    color: white;
+}
+
+.status-indicator.disconnected {
+    background: var(--danger-color);
+    color: white;
+}
+
+button#refreshBtn {
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background 0.2s;
+}
+
+button#refreshBtn:hover {
+    background: #2980b9;
+}
+
+/* Main Content */
+.main-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 300px;
+    background: white;
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+}
+
+.sidebar h2 {
+    padding: 1rem;
+    font-size: 1.125rem;
+    border-bottom: 1px solid var(--border-color);
+    background: #f8f9fa;
+}
+
+.task-list {
+    padding: 0.5rem;
+    flex: 1;
+    overflow-y: auto;
+}
+
+.task-card {
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 1rem;
+    margin-bottom: 0.5rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.task-card:hover {
+    border-color: var(--primary-color);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.task-card.selected {
+    border-left: 4px solid var(--primary-color);
+    background: #f0f8ff;
+}
+
+.task-card.success {
+    border-left: 4px solid var(--success-color);
+}
+
+.task-card.failed {
+    border-left: 4px solid var(--danger-color);
+}
+
+.task-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.task-id {
+    font-weight: 600;
+    font-family: monospace;
+}
+
+.status-badge {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.status-running {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.status-completed {
+    background: var(--success-color);
+    color: white;
+}
+
+.status-failed {
+    background: var(--danger-color);
+    color: white;
+}
+
+.status-timeout {
+    background: var(--warning-color);
+    color: white;
+}
+
+.task-meta {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+}
+
+.view-btn {
+    width: 100%;
+    background: transparent;
+    color: var(--primary-color);
+    border: 1px solid var(--primary-color);
+    padding: 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.view-btn:hover {
+    background: var(--primary-color);
+    color: white;
+}
+
+/* Trace Panel */
+.trace-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.panel-header {
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    background: white;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.task-info {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.trace-viz-container {
+    flex: 1;
+    background: white;
+    position: relative;
+    overflow: hidden;
+}
+
+.graph-placeholder {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    color: var(--text-secondary);
+}
+
+/* Analysis Panel */
+.analysis-panel {
+    width: 400px;
+    background: white;
+    border-left: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.tabs {
+    display: flex;
+    background: #f8f9fa;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.tab {
+    flex: 1;
+    padding: 0.75rem;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-weight: 500;
+    color: var(--text-secondary);
+    border-bottom: 3px solid transparent;
+    transition: all 0.2s;
+}
+
+.tab.active {
+    color: var(--primary-color);
+    border-bottom-color: var(--primary-color);
+    background: white;
+}
+
+.tab-content {
+    flex: 1;
+    padding: 1rem;
+    overflow-y: auto;
+    display: none;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+.attribution-report, .explanation-container {
+    font-size: 0.875rem;
+}
+
+.attribution-report ul, .explanation-container ol, .explanation-container ul {
+    margin-left: 1.5rem;
+    margin-top: 0.5rem;
+}
+
+.attribution-report li, .explanation-container li {
+    margin-bottom: 0.75rem;
+}
+
+.attribution-report strong, .explanation-container strong {
+    color: var(--text-primary);
+    display: block;
+    margin-bottom: 0.25rem;
+}
+
+.impact-positive {
+    color: var(--success-color);
+    font-weight: 500;
+}
+
+.impact-negative {
+    color: var(--danger-color);
+    font-weight: 500;
+}
+
+.failure {
+    background: #fdecea;
+    padding: 0.5rem;
+    border-radius: 4px;
+    border-left: 3px solid var(--danger-color);
+}
+
+.certainty-indicator {
+    background: linear-gradient(135deg, var(--primary-color), var(--info-color));
+    color: white;
+    padding: 1rem;
+    border-radius: 8px;
+    text-align: center;
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    box-shadow: 0 2px 8px rgba(52, 152, 219, 0.3);
+}
+
+/* Metrics Panel */
+.metrics-panel {
+    background: white;
+    border-top: 1px solid var(--border-color);
+    padding: 1rem;
+    max-height: 200px;
+}
+
+.metrics-panel h3 {
+    margin-bottom: 0.75rem;
+    font-size: 1rem;
+}
+
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+}
+
+.metric-card {
+    background: #f8f9fa;
+    padding: 1rem;
+    border-radius: 8px;
+    text-align: center;
+    border: 1px solid var(--border-color);
+    transition: transform 0.2s;
+}
+
+.metric-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.metric-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 0.25rem;
+}
+
+.metric-label {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.metric-unit {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+/* Modal */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+}
+
+.modal-content {
+    background: white;
+    margin: 5% auto;
+    padding: 2rem;
+    border-radius: 8px;
+    width: 80%;
+    max-width: 800px;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+
+.close {
+    float: right;
+    font-size: 1.5rem;
+    font-weight: bold;
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.close:hover {
+    color: var(--text-primary);
+}
+

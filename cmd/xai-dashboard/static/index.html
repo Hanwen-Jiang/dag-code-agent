@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XAI Dashboard - Explainable AI Agent System</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape@3/dist/cytoscape.min.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <h1>XAI Dashboard</h1>
+            <div class="header-controls">
+                <button id="refreshBtn" onclick="loadTraces()">Refresh Traces</button>
+                <div id="connectionStatus" class="status-indicator connected">Connected</div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Left Sidebar: Task List -->
+            <aside class="sidebar">
+                <h2>Recent Tasks</h2>
+                <div id="taskList" class="task-list">
+                    <!-- Tasks will be loaded here -->
+                    <div class="loading-spinner">Loading tasks...</div>
+                </div>
+            </aside>
+
+            <!-- Center Panel: Trace Visualization -->
+            <main class="trace-panel">
+                <div class="panel-header">
+                    <h2>Execution Trace</h2>
+                    <div id="selectedTaskInfo"></div>
+                </div>
+                
+                <div id="traceVisualization" class="trace-viz-container">
+                    <!-- Cytoscape graph will render here -->
+                    <div class="graph-placeholder">Select a task to view trace details</div>
+                </div>
+            </main>
+
+            <!-- Right Panel: Attribution & Explanation -->
+            <aside class="analysis-panel">
+                <div class="tabs">
+                    <button class="tab active" onclick="showTab('attribution')">Attribution Analysis</button>
+                    <button class="tab" onclick="showTab('explanation')">Reasoning Explanation</button>
+                </div>
+
+                <div id="attributionPanel" class="tab-content active">
+                    <h3>Key Steps & Decisions</h3>
+                    <div id="attributionContent"></div>
+                </div>
+
+                <div id="explanationPanel" class="tab-content">
+                    <h3>Natural Language Explanation</h3>
+                    <div id="explanationContent"></div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- Bottom Panel: Metrics Summary -->
+        <section class="metrics-panel">
+            <h3>Performance Metrics</h3>
+            <div class="metrics-grid" id="metricsGrid">
+                <!-- Metrics widgets will be inserted here -->
+            </div>
+        </section>
+    </div>
+
+    <!-- Detailed View Modal -->
+    <div id="detailModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <div id="modalBody"></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
+

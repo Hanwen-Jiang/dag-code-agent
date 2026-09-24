@@ -1,0 +1,33 @@
+# .dag/hooks.yaml - Hook configuration example
+# Reference: Chapter 32.4 of AI Agent Architecture, Shannon's local CLI hook system
+
+hooks:
+  # PreToolUse: Intercept tool calls before execution (can block)
+  PreToolUse:
+    # Block dangerous bash commands
+    - matcher: "bash"
+      command: "./hooks/check-bash.sh"
+    
+    # Block production environment file modifications
+    - matcher: "file_write|file_edit"
+      command: "./hooks/check-prod-files.sh"
+
+  # PostToolUse: Log or notify after tool execution completes (non-blocking)
+  PostToolUse:
+    # Log all file edits for audit trail
+    - matcher: "file_write|file_edit"
+      command: "./hooks/post-edit-log.sh"
+    
+    # Send notifications for shell commands
+    - matcher: ".*"
+      command: "./hooks/command-notifier.sh"
+
+  # SessionStart: Initialize when session begins
+  SessionStart:
+    # Log session start with metadata
+    - command: "./hooks/on-start.sh"
+
+  # Stop: Cleanup when session ends
+  Stop:
+    # Archive session data
+    - command: "./hooks/on-stop.sh"

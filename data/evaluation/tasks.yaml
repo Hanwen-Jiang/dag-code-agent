@@ -1,0 +1,56 @@
+# Canonical evaluation dataset for the self-evolution framework.
+# Consumed by cmd/self-evolution (baseline + daily ablation).
+#
+# GroundTruth lists the concepts the evaluation runner expects the task output
+# to cover (case-insensitive; substrings of 4+ characters count as covered).
+version: v1
+tasks:
+  - id: task-research-transformers
+    type: research
+    query: "Summarize the key ideas behind the Transformer architecture."
+    ground_truth:
+      - attention mechanism
+      - self-attention
+      - positional encoding
+      - encoder decoder
+    budget: 100
+
+  - id: task-coding-binary-search
+    type: coding
+    query: "Implement binary search over a sorted integer slice."
+    ground_truth:
+      - mid
+      - left
+      - right
+      - comparison
+    budget: 50
+
+  - id: task-analysis-refactor
+    type: analysis
+    query: "Explain how to reduce coupling in a layered service design."
+    ground_truth:
+      - interface
+      - dependency injection
+      - separation of concerns
+      - contract
+    budget: 80
+
+  - id: task-research-vector-db
+    type: research
+    query: "Compare vector database options for RAG pipelines."
+    ground_truth:
+      - embedding
+      - cosine similarity
+      - index
+      - recall
+    budget: 100
+
+  - id: task-coding-retry
+    type: coding
+    query: "Design a retry policy with exponential backoff and jitter."
+    ground_truth:
+      - backoff
+      - jitter
+      - max attempts
+      - idempotency
+    budget: 60

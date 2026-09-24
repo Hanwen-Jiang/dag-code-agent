@@ -1,0 +1,47 @@
+# Real external infrastructure for the full three-layer stack.
+#
+#   docker compose up -d temporal qdrant
+#
+# The Go binaries degrade gracefully without these services (in-memory
+# executor, local embeddings, memory vector store), but with this stack they
+# exercise the production code paths:
+#   orchestrator  -> Temporal (host "temporal", port 7233)
+#   agent-core    -> Qdrant   (host "qdrant",   port 6334 gRPC)
+#
+# Ports:
+#   temporal: 7233 (gRPC), 8233 (Web UI)
+#   qdrant:   6333 (HTTP), 6334 (gRPC)
+
+services:
+  temporal:
+    image: temporalio/auto-setup:1.26.1
+    container_name: dsh-temporal
+    environment:
+      DB: sqlite
+      DB_PORT: "3306"
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --address temporal:7233 workflow list | grep -q 'ListWorkflowExecutions' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: dsh-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && echo -e \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q ok <&3'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  qdrant-data:

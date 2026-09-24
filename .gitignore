@@ -1,0 +1,10 @@
+.data/
+.env
+*.db
+coverage.out
+dist/
+bin/
+frontend/node_modules/
+/orchestrator
+*.test
+.DS_Store
