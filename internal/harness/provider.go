@@ -3,9 +3,6 @@ package harness
 import (
 	"context"
 	"net/http"
-	"os"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -22,74 +19,47 @@ type ModelProviderStatus struct {
 	Detail        string `json:"detail"`
 }
 
-// DescribeModelProvider resolves the provider without making a network call.
-// With no remote settings the project intentionally stays usable offline. A
-// partial remote configuration is reported as misconfigured instead of being
-// silently replaced by the local conversational adapter.
-func DescribeModelProvider() ModelProviderStatus {
-	provider := strings.ToLower(strings.TrimSpace(os.Getenv("HARNESS_MODEL_PROVIDER")))
-	baseURL := strings.TrimSpace(os.Getenv("HARNESS_MODEL_BASE_URL"))
-	apiKey := firstNonEmptyEnv("HARNESS_MODEL_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY")
-	model := strings.TrimSpace(os.Getenv("HARNESS_MODEL_NAME"))
-	if model == "" {
-		model = "deepseek-chat"
-	}
+// OpenAIAdapterConfig is the explicit configuration for a remote
+// OpenAI-compatible adapter. The core never reads the environment; callers
+// (typically internal/modelenv) translate env vars into this struct.
+type OpenAIAdapterConfig struct {
+	BaseURL    string
+	APIKey     string
+	Model      string
+	Timeout    time.Duration
+	MaxRetries int
+	RetryBase  time.Duration
+}
 
-	if provider == "" {
-		switch {
-		case baseURL != "" || apiKey != "":
-			provider = "openai-compatible"
-		default:
-			provider = "local"
-		}
+// NewOpenAICompatibleAdapter builds a remote adapter from explicit settings.
+func NewOpenAICompatibleAdapter(cfg OpenAIAdapterConfig) *OpenAICompatibleAdapter {
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 90 * time.Second
 	}
-
-	if provider == "local" || provider == "offline" || provider == "fixture" {
-		return ModelProviderStatus{
-			Provider:      "local",
-			Mode:          "offline",
-			Model:         "local-conversation",
-			Configured:    true,
-			KeyConfigured: false,
-			Detail:        "未配置远程模型，当前使用本地离线适配器",
-		}
+	retries := cfg.MaxRetries
+	if retries == 0 {
+		retries = 2
 	}
-
-	configured := baseURL != "" && apiKey != "" && model != ""
-	detail := "已配置 OpenAI-compatible API"
-	if !configured {
-		detail = "缺少 HARNESS_MODEL_BASE_URL、HARNESS_MODEL_API_KEY 或 HARNESS_MODEL_NAME"
+	retryBase := cfg.RetryBase
+	if retryBase <= 0 {
+		retryBase = 250 * time.Millisecond
 	}
-	return ModelProviderStatus{
-		Provider:      "openai-compatible",
-		Mode:          "remote",
-		Model:         model,
-		BaseURL:       redactBaseURL(baseURL),
-		Configured:    configured,
-		KeyConfigured: apiKey != "",
-		Detail:        detail,
+	return &OpenAICompatibleAdapter{
+		BaseURL:    cfg.BaseURL,
+		APIKey:     cfg.APIKey,
+		ModelName:  cfg.Model,
+		Client:     &http.Client{Timeout: timeout},
+		MaxRetries: retries,
+		RetryBase:  retryBase,
 	}
 }
 
-// NewChatModelFromEnv is the single construction boundary for conversational
-// sessions. The same Runtime, tools, event log and replay path are used for
-// both adapters; only the model provider changes here.
-func NewChatModelFromEnv() (ModelAdapter, ModelProviderStatus) {
-	status := DescribeModelProvider()
-	if status.Provider == "local" {
-		return NewConversationModel(), status
-	}
-	if !status.Configured {
-		return unavailableModel{provider: status.Provider, detail: status.Detail}, status
-	}
-	return &OpenAICompatibleAdapter{
-		BaseURL:    strings.TrimSpace(os.Getenv("HARNESS_MODEL_BASE_URL")),
-		APIKey:     firstNonEmptyEnv("HARNESS_MODEL_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"),
-		ModelName:  status.Model,
-		Client:     &http.Client{Timeout: providerTimeout()},
-		MaxRetries: 2,
-		RetryBase:  250 * time.Millisecond,
-	}, status
+// UnavailableModel returns an adapter that fails loudly with
+// MODEL_PROVIDER_NOT_CONFIGURED instead of silently degrading a partially
+// configured remote provider to the offline fixture.
+func UnavailableModel(provider, detail string) ModelAdapter {
+	return unavailableModel{provider: provider, detail: detail}
 }
 
 type unavailableModel struct {
@@ -103,31 +73,6 @@ func (m unavailableModel) Complete(context.Context, ModelRequest) (ModelResponse
 }
 func (m unavailableModel) Stream(context.Context, ModelRequest) (<-chan StreamEvent, error) {
 	return nil, &ModelError{Message: "MODEL_PROVIDER_NOT_CONFIGURED: " + m.detail, Provider: m.provider, Retryable: false}
-}
-
-func firstNonEmptyEnv(keys ...string) string {
-	for _, key := range keys {
-		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func providerTimeout() time.Duration {
-	seconds, err := strconv.Atoi(strings.TrimSpace(os.Getenv("HARNESS_MODEL_TIMEOUT_SECONDS")))
-	if err != nil || seconds <= 0 {
-		seconds = 90
-	}
-	return time.Duration(seconds) * time.Second
-}
-
-func redactBaseURL(value string) string {
-	value = strings.TrimRight(strings.TrimSpace(value), "/")
-	if value == "" {
-		return ""
-	}
-	return value
 }
 
 var _ ModelAdapter = unavailableModel{}

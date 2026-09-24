@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +22,7 @@ type Server struct {
 	Provider     harness.ModelProviderStatus
 	DAGManifest  dag.Manifest
 	DAGLoadError error
+	sessionFactory func(string, harness.TaskRequest, harness.AuthContext) (*harness.DemoEnvironment, error)
 	runsMu       sync.RWMutex
 	runs         map[string]*harnessSession
 }
@@ -61,60 +60,111 @@ type dagDecisionRequest struct {
 	Actor   string `json:"actor"`
 }
 
-func NewHandler() (http.Handler, func(), error) {
-	controlPath := os.Getenv("HARNESS_DB_PATH")
-	if controlPath == "" {
-		controlPath = ":memory:"
-	}
-	return NewHandlerWithPaths(controlPath)
+// Config describes everything the control-plane HTTP adapter needs.
+//
+// The adapter never reads the environment and never probes the filesystem:
+// the embedder supplies the store, the DAG manifest, the CORS policy and the
+// mount prefix. That is what allows this handler to be mounted inside someone
+// else's server instead of only being usable as a standalone binary.
+type Config struct {
+	// Store is required and is owned by the caller: New never closes it.
+	Store harness.Store
+
+	// Journal is optional; when nil it is derived from Store.
+	Journal *harness.Journal
+
+	// Provider is the safe-to-display model status reported by
+	// /api/model/status.
+	Provider harness.ModelProviderStatus
+
+	// DAGManifest is the canonical DAG served by the /api/dag endpoints.
+	DAGManifest dag.Manifest
+
+	// DAGLoadError is surfaced by those endpoints when the manifest could not
+	// be loaded. It lets the embedder keep path resolution outside this
+	// package.
+	DAGLoadError error
+
+	// CORSOrigins enables CORS when non-empty. "*" allows any origin;
+	// otherwise the request Origin is echoed when it is listed.
+	CORSOrigins []string
+
+	// RoutePrefix mounts every route under a prefix, e.g. "/agent".
+	RoutePrefix string
+
+	// SessionFactory builds the environment used for a chat/demo session.
+	// When nil, the built-in offline fixture is used.
+	SessionFactory func(mode string, request harness.TaskRequest, auth harness.AuthContext) (*harness.DemoEnvironment, error)
 }
 
-// NewHandlerWithPaths keeps a variadic second argument for compatibility with
-// an earlier combined demo. This package owns only the Harness control plane.
-func NewHandlerWithPaths(controlPath string, _ ...string) (http.Handler, func(), error) {
-	controlStore, err := harness.NewSQLiteStore(controlPath)
-	if err != nil {
-		return nil, func() {}, err
+// New builds the control-plane HTTP handler.
+func New(cfg Config) (http.Handler, error) {
+	if cfg.Store == nil {
+		return nil, errors.New("httpapi: Config.Store is required")
 	}
-	server := &Server{HarnessStore: controlStore, Journal: harness.NewJournal(controlStore, harness.SystemClock()), Feedback: harness.FeedbackCollector{Store: controlStore}, Provider: harness.DescribeModelProvider(), runs: map[string]*harnessSession{}}
-	server.DAGManifest, server.DAGLoadError = loadDAGManifest()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", server.health)
-	mux.HandleFunc("/api/model/status", server.modelStatus)
-	mux.HandleFunc("/api/harness/demo", server.harnessDemo)
-	mux.HandleFunc("/api/harness/runs", server.harnessRuns)
-	mux.HandleFunc("/api/harness/runs/", server.harnessRun)
-	mux.HandleFunc("/api/feedback", server.feedback)
-	mux.HandleFunc("/api/feedback/metrics", server.feedbackMetrics)
-	mux.HandleFunc("/api/dag/manifest", server.dagManifest)
-	mux.HandleFunc("/api/dag/start", server.dagStart)
-	mux.HandleFunc("/api/dag/runs/", server.dagRun)
-	return withCORS(mux), func() { _ = controlStore.Close() }, nil
-}
-
-func loadDAGManifest() (dag.Manifest, error) {
-	configured := os.Getenv("DAG_MANIFEST_PATH")
-	candidates := []string{}
-	if configured != "" {
-		candidates = append(candidates, configured)
+	journal := cfg.Journal
+	if journal == nil {
+		journal = harness.NewJournal(cfg.Store, harness.SystemClock())
 	}
-	candidates = append(candidates,
-		"configs/software-feature-with-rework-and-uat.json",
-		"../configs/software-feature-with-rework-and-uat.json",
-		"../../configs/software-feature-with-rework-and-uat.json",
-		filepath.Join("..", "..", "..", "configs", "software-feature-with-rework-and-uat.json"),
-	)
-	for _, path := range candidates {
-		if _, err := os.Stat(path); err != nil {
-			continue
+	factory := cfg.SessionFactory
+	if factory == nil {
+		store := cfg.Store
+		factory = func(_ string, request harness.TaskRequest, auth harness.AuthContext) (*harness.DemoEnvironment, error) {
+			return harness.BuildDemoEnvironmentWithStore(store, request, auth)
 		}
-		return dag.LoadManifest(path)
 	}
-	return dag.Manifest{}, fmt.Errorf("DAG_MANIFEST_NOT_FOUND")
+	server := &Server{
+		HarnessStore:   cfg.Store,
+		Journal:        journal,
+		Feedback:       harness.FeedbackCollector{Store: cfg.Store},
+		Provider:       cfg.Provider,
+		DAGManifest:    cfg.DAGManifest,
+		DAGLoadError:   cfg.DAGLoadError,
+		sessionFactory: factory,
+		runs:           map[string]*harnessSession{},
+	}
+	mux := http.NewServeMux()
+	prefix := strings.TrimSuffix(cfg.RoutePrefix, "/")
+	mount := func(pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(prefix+pattern, handler)
+	}
+	mount("/health", server.health)
+	mount("/api/model/status", server.modelStatus)
+	mount("/api/harness/demo", server.harnessDemo)
+	mount("/api/harness/runs", server.harnessRuns)
+	mount("/api/harness/runs/", server.harnessRun)
+	mount("/api/feedback", server.feedback)
+	mount("/api/feedback/metrics", server.feedbackMetrics)
+	mount("/api/dag/manifest", server.dagManifest)
+	mount("/api/dag/start", server.dagStart)
+	mount("/api/dag/runs/", server.dagRun)
+	var handler http.Handler = mux
+	if len(cfg.CORSOrigins) > 0 {
+		handler = withCORS(handler, cfg.CORSOrigins)
+	}
+	return handler, nil
 }
-func withCORS(next http.Handler) http.Handler {
+
+// withCORS answers preflight requests and echoes an allowlisted Origin.
+func withCORS(next http.Handler, origins []string) http.Handler {
+	allowAll := false
+	allowed := map[string]bool{}
+	for _, origin := range origins {
+		trimmed := strings.TrimRight(strings.TrimSpace(origin), "/")
+		if trimmed == "*" {
+			allowAll = true
+		}
+		allowed[trimmed] = true
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := strings.TrimRight(r.Header.Get("Origin"), "/")
+		switch {
+		case allowAll:
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		case origin != "" && allowed[origin]:
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Last-Event-ID")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		if r.Method == http.MethodOptions {
@@ -202,7 +252,7 @@ func (s *Server) createHarnessRun(w http.ResponseWriter, r *http.Request) {
 	request.Metadata["session_mode"] = "chat"
 	request.Metadata["project_id"] = input.ProjectID
 	request.Metadata["project_name"] = input.ProjectName
-	env, err := harness.BuildChatEnvironmentWithStore(s.HarnessStore, request, auth)
+	env, err := s.sessionFactory("chat", request, auth)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -295,11 +345,11 @@ func (s *Server) getHarnessSession(taskID string) (*harnessSession, error) {
 	request := taskRequestFromState(state)
 	auth := harness.AuthContext{TenantID: state.TenantID, SubjectID: state.SubjectID, Scopes: []string{"memory:read", "artifact:write", "artifact:read", "workspace:read", "workspace:write"}}
 	var env *harness.DemoEnvironment
-	if mode, _ := state.Metadata["session_mode"].(string); mode == "chat" {
-		env, err = harness.BuildChatEnvironmentWithStore(s.HarnessStore, request, auth)
-	} else {
-		env, err = harness.BuildDemoEnvironmentWithStore(s.HarnessStore, request, auth)
+	mode, _ := state.Metadata["session_mode"].(string)
+	if mode == "" {
+		mode = "demo"
 	}
+	env, err = s.sessionFactory(mode, request, auth)
 	if err != nil {
 		return nil, err
 	}

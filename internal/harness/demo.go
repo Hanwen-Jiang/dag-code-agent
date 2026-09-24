@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"strings"
 )
 
 type DemoEnvironment struct {
@@ -135,31 +133,10 @@ func BuildDemoEnvironmentWithStore(store Store, request TaskRequest, auth AuthCo
 	return &DemoEnvironment{Store: store, Journal: runtime.Journal(), Runtime: runtime, Request: request, Auth: auth, Model: model, Adapter: model, Provider: ModelProviderStatus{Provider: "scripted", Mode: "offline", Model: model.Name(), Configured: true, Detail: "离线 Harness fixture，不调用外部模型"}, Prefix: prefix, Registry: registry, Memory: memory, Skills: skills, Context: runtime.ContextBuilder(), MCP: mcp}, nil
 }
 
-// BuildChatEnvironmentWithStore keeps the same tools, memory and evidence
-// plumbing as the offline fixture but swaps in a conversational adapter and
-// removes the demo-only structured verifier.
-func BuildChatEnvironmentWithStore(store Store, request TaskRequest, auth AuthContext) (*DemoEnvironment, error) {
-	env, err := BuildDemoEnvironmentWithStore(store, request, auth)
-	if err != nil {
-		return nil, err
-	}
-	adapter, provider := NewChatModelFromEnv()
-	workspace := NewWorkspaceTools(os.Getenv("HARNESS_WORKSPACE_ROOT"))
-	if err := workspace.Register(env.Registry); err != nil {
-		return nil, err
-	}
-	auth.Scopes = append(auth.Scopes, "workspace:read", "workspace:write")
-	env.Auth = auth
-	env.Adapter = adapter
-	env.Provider = provider
-	if effort := strings.TrimSpace(os.Getenv("HARNESS_MODEL_REASONING_EFFORT")); effort != "" {
-		env.Request.ReasoningEffort = effort
-	}
-	env.Runtime.SetModel(adapter)
-	env.Runtime.SetVerifier(nil)
-	env.Request.ResponseSchema = nil
-	return env, nil
-}
+// The conversational (chat) environment used to live here. It read
+// HARNESS_MODEL_* and HARNESS_WORKSPACE_ROOT directly, which made the core
+// impossible to embed predictably. It now lives in internal/modelenv, which
+// translates the environment into explicit harness options.
 
 func demoResponseSchema() map[string]any {
 	return map[string]any{"type": "object", "required": []string{"status", "artifact_id", "verified"}, "properties": map[string]any{"status": map[string]any{"type": "string"}, "artifact_id": map[string]any{"type": "string"}, "verified": map[string]any{"type": "boolean"}}, "additionalProperties": false}

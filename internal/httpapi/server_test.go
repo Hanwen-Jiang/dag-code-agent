@@ -8,6 +8,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/dag"
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/harness"
+	"github.com/Hanwen-Jiang/dag-code-agent/internal/modelenv"
 )
 
 func requestJSON(t *testing.T, client *http.Client, method, url string, input any, output any) int {
@@ -39,11 +43,20 @@ func requestJSON(t *testing.T, client *http.Client, method, url string, input an
 }
 
 func TestHTTPHarnessSessionAndDAGEndToEnd(t *testing.T) {
-	handler, closeFn, err := NewHandler()
+	store, err := harness.NewSQLiteStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer closeFn()
+	defer store.Close()
+	settings := modelenv.FromEnv()
+	manifest, manifestErr := dag.LoadManifest("../../configs/software-feature-with-rework-and-uat.json")
+	if manifestErr != nil {
+		t.Fatal(manifestErr)
+	}
+	handler, err := New(Config{Store: store, Provider: settings.Describe(), DAGManifest: manifest, SessionFactory: settings.SessionFactory(store)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	client := server.Client()
@@ -154,11 +167,16 @@ func TestHTTPHarnessSessionAndDAGEndToEnd(t *testing.T) {
 }
 
 func TestHTTPMissingHarnessRun(t *testing.T) {
-	handler, closeFn, err := NewHandler()
+	store, err := harness.NewSQLiteStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer closeFn()
+	defer store.Close()
+	settings := modelenv.FromEnv()
+	handler, err := New(Config{Store: store, Provider: settings.Describe(), SessionFactory: settings.SessionFactory(store)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	var body map[string]any
