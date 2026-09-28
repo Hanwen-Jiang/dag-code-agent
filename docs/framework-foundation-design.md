@@ -876,7 +876,11 @@ nil 语义发生了变化——把 nil 的 `*SkillRegistry` 赋给接口会存�
 `ActionFanout` 与 `ActionRunDAG` **明确不实现**，理由记录在类型上而非留给后人重新发现：
 
 - **`FanoutSpec` 不是一个 Branches 字段。** 它带 `Scorer` / `Prune` / `Rounds` / `Personas`，这些需要一个运行时**没有**的评分器注册表。只实现 `Branches` 会让三个已声明字段**静默失效** —— 与本项目已修过两次的陷阱同类（`Action.Model`、类型化 nil）。一个策略作者设了 `Prune` 就会合理地期待剪枝发生。
-- **`ActionRunDAG` 结构上不可能走 dag 包**：`harness/dag` **反向 import 了 `harness`**（`executor.go`），核心引用它会形成 import cycle。想用 DAG 的策略把它表达为一串 spawn 即可 —— 这是便利性缺口，不是能力缺口。
+- **`ActionRunDAG` 的理由比 import cycle 更强**：`harness/dag` 的反向 import 确实让核心引用它形成 cycle，但真正的原因是**这条能力已经存在且对嵌入者可达**。把它复制进内核会产生**第二份 DAG 实现**，而后必须**彼此保持一致**——两份实现的漂移正是本项目反复遇到的失败模式。
+
+  「策略可以把 DAG 表达为串行 spawn 波次」这一说法**已由测试证明，而非断言**：`harness/strategy_dag_waves_test.go` 跑出 A → {B, C} → D 的依赖图，并断言 **D 的 spawn 事件在 B 与 C 完成之后**、**B 与 C 属于同一波次**。若该测试不再通过，「便利性缺口而非能力缺口」的判断即为假，此处的决定需要重新审视。
+
+- **`ActionFanout` 已实现**（第 25 轮）：评分器注册表 + best-of-N 采样 + 剪枝。
 
 两者仍以 `ErrStrategyContract` **明确拒绝**，并有测试断言拒绝信息**点出动作名且读起来是「不支持」**，而非崩溃或静默空操作 —— 策略作者必须能分辨「不支持」与「我写错了」。
 

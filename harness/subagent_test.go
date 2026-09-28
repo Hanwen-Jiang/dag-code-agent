@@ -48,10 +48,12 @@ func (m *delegatingModel) Complete(_ context.Context, request ModelRequest) (Mod
 			FinishReason: "stop",
 		}, nil
 	}
-	for _, marker := range []string{"alpha", "beta"} {
-		if strings.Contains(text, "ANSWER-FOR "+marker) {
-			return ModelResponse{Text: "answer from " + marker, FinishReason: "stop"}, nil
-		}
+	// The marker is read from the request rather than checked against a fixed
+	// list of names. A hardcoded list silently answered "parent final answer" for
+	// any node whose name was not in it, which made a graph test look like a
+	// wrong-topology failure.
+	if marker := answerMarker(text); marker != "" {
+		return ModelResponse{Text: "answer from " + marker, FinishReason: "stop"}, nil
 	}
 	return ModelResponse{Text: "parent final answer", FinishReason: "stop"}, nil
 }
@@ -542,4 +544,19 @@ func TestIterationBackstopAllowsLegitimateWork(t *testing.T) {
 	if result.Status != TaskCompleted {
 		t.Fatalf("legitimate work failed with %s/%s: the backstop is too tight", result.Status, result.FailureCategory)
 	}
+}
+
+// answerMarker extracts the name following "ANSWER-FOR " in a request.
+func answerMarker(text string) string {
+	const marker = "ANSWER-FOR "
+	index := strings.Index(text, marker)
+	if index < 0 {
+		return ""
+	}
+	rest := text[index+len(marker):]
+	end := strings.IndexAny(rest, " \n.\t")
+	if end < 0 {
+		end = len(rest)
+	}
+	return rest[:end]
 }
