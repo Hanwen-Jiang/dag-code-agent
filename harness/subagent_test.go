@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -285,26 +286,82 @@ func TestSubagentBudgetIsBounded(t *testing.T) {
 	}
 }
 
-// A fan-out whose child ids collide with completed work reuses it rather than
-// failing the parent.
-func TestSubagentMergeReportsFailureWithoutFailingParent(t *testing.T) {
-	runtime, store, auth := subagentRuntime(t, WithSubagentPolicy(SubagentPolicy{
-		MaxParallel: 1, MaxDepth: 1, DefaultMaxSteps: 1, BudgetShare: 0.25,
-	}))
+// A failed child must not fail the parent.
+//
+// The previous version of this test accepted either COMPLETED or FAILED, so it
+// could not distinguish the property its name claimed: a parent that failed
+// because a child failed would have passed. It also used a model whose children
+// all succeeded, so the failure branch was never reached at all — a test that
+// passes for a reason unrelated to what it asserts.
+func TestFailedChildDoesNotFailTheParent(t *testing.T) {
+	store := NewInMemoryStore()
 	defer store.Close()
+	model := &failingChildModel{inner: newDelegatingModel()}
+	runtime, err := New(
+		WithStore(store), WithModel(model),
+		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))),
+		WithIDSource(sequentialIDs()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer runtime.Close()
+	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
 
 	result, err := runtime.Run(context.Background(), TaskRequest{
-		TaskID: "parent", Goal: "DELEGATE this work", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 6,
+		TaskID: "partial", Goal: "DELEGATE this work", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 6,
 	}, auth)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// A child with a one-step budget still has to produce an answer; whatever
-	// happens, the parent must reach a terminal state rather than hang.
-	if result.Status != TaskCompleted && result.Status != TaskFailed {
-		t.Fatalf("parent ended in %s", result.Status)
+	// The claim, asserted rather than allowed to be either outcome.
+	if result.Status != TaskCompleted {
+		t.Fatalf("parent status=%s category=%s: a failed child took the parent down",
+			result.Status, result.FailureCategory)
 	}
+
+	events, err := runtime.Journal().Replay("partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, completed := 0, 0
+	for _, event := range events {
+		switch event.Type {
+		case "SUBAGENT_FAILED":
+			failed++
+			if stringValue(event.Payload["agent_id"]) != "alpha" {
+				t.Fatalf("the wrong child failed: %v", event.Payload["agent_id"])
+			}
+		case "SUBAGENT_COMPLETED":
+			completed++
+		}
+	}
+	// Without this the test would pass on a fan-out where nothing failed, which
+	// is exactly the defect the previous version had.
+	if failed == 0 {
+		t.Fatal("no child failed, so nothing about a failed child was tested")
+	}
+	if completed == 0 {
+		t.Fatal("the sibling that should have succeeded did not")
+	}
+}
+
+// failingChildModel makes one named child fail and delegates the rest.
+type failingChildModel struct {
+	inner *delegatingModel
+}
+
+func (m *failingChildModel) Name() string { return "failing-child" }
+
+func (m *failingChildModel) Complete(ctx context.Context, request ModelRequest) (ModelResponse, error) {
+	if strings.Contains(requestText(request), "ANSWER-FOR alpha") {
+		return ModelResponse{}, errors.New("child exploded")
+	}
+	return m.inner.Complete(ctx, request)
+}
+
+func (m *failingChildModel) Stream(context.Context, ModelRequest) (<-chan StreamEvent, error) {
+	return nil, ErrNotSupported
 }
 
 // A strategy may decide to delegate itself. Before this the kernel validated
