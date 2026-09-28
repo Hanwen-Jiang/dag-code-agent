@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -413,6 +414,9 @@ func New(opts ...Option) (*Runtime, error) {
 			cfg.mailboxStore = candidate
 		}
 	}
+	// Background tasks hang off a context the runtime owns, so Close can stop
+	// them. context.Background() would make them outlive the runtime.
+	baseCtx, baseCancel := context.WithCancelCause(context.Background())
 	return &Runtime{
 		store:          cfg.store,
 		journal:        journal,
@@ -436,5 +440,7 @@ func New(opts ...Option) (*Runtime, error) {
 		streamBuffer:   cfg.streamBuffer,
 		subagentPolicy: cfg.subagentPolicy,
 		watchdog:       cfg.watchdog,
+		baseCtx:        baseCtx,
+		baseCancel:     baseCancel,
 	}, nil
 }

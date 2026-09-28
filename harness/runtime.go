@@ -76,6 +76,15 @@ type Runtime struct {
 	// the very thing it is trying to stop.
 	runningMu sync.Mutex
 	running   map[string]context.CancelCauseFunc
+	// baseCtx is the parent of every background task. Background work must be
+	// owned by the runtime, not by context.Background(): a task detached from
+	// everything would survive Close and leak past the runtime's lifetime.
+	baseCtx    context.Context
+	baseCancel context.CancelCauseFunc
+	// background tracks live background tasks, guarded by its own lock: a
+	// background task holds r.mu while it runs, so tracking must not need it.
+	backgroundMu sync.Mutex
+	background   map[string]*RunHandle
 	// newID generates identifiers created during a run; injectable so a
 	// deterministic test can assert a byte-identical journal.
 	newID func(string) string
@@ -169,11 +178,19 @@ func (r *Runtime) SetVerifier(verifier VerifyFunc) {
 // Close releases the store when the runtime created it. A store supplied with
 // WithStore is owned by the embedder and is left open.
 func (r *Runtime) Close() error {
+	// Background tasks first: leaving them running against a closed store would
+	// turn an orderly shutdown into a burst of store errors.
+	if r.baseCancel != nil {
+		r.baseCancel(errRuntimeClosed)
+	}
 	if !r.ownsStore || r.store == nil {
 		return nil
 	}
 	return r.store.Close()
 }
+
+// errRuntimeClosed is the cause reported to background tasks stopped by Close.
+var errRuntimeClosed = errors.New("harness: runtime closed")
 
 // NewRuntime builds a runtime from explicit collaborators.
 //
