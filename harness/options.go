@@ -51,6 +51,8 @@ type runtimeConfig struct {
 	toolCatalogThreshold int
 	// watchdog bounds live runs.
 	watchdog WatchdogPolicy
+	// memoryRanker orders memory retrieval when set.
+	memoryRanker MemoryRanker
 }
 
 // WithStreamBuffer sets how many observation frames a streamed run may queue
@@ -348,6 +350,9 @@ func New(opts ...Option) (*Runtime, error) {
 	// Reuse the artifact projection for context spill: it is already
 	// content-addressed, idempotent and tenant-scoped, which is everything the
 	// spill level needs.
+	if cfg.memoryRanker != nil && cfg.memory != nil {
+		cfg.memory.SetRanker(cfg.memoryRanker)
+	}
 	if cfg.skillResolver != nil {
 		cfg.contextBuilder.Skills = cfg.skillResolver
 	}

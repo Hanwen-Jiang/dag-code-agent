@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"strings"
@@ -10,6 +11,8 @@ import (
 type MemoryManager struct {
 	Store MemoryStore
 	clock Clock
+	// ranker orders candidates when set. Nil keeps lexical overlap.
+	ranker MemoryRanker
 }
 
 func NewMemoryManager(store MemoryStore) *MemoryManager {
@@ -18,6 +21,13 @@ func NewMemoryManager(store MemoryStore) *MemoryManager {
 
 // SetClock replaces the time source used for expiry comparisons and timestamps.
 func (m *MemoryManager) SetClock(clock Clock) { m.clock = clockOrSystem(clock) }
+
+// SetRanker installs a memory ranker. Nil keeps lexical overlap, which is the
+// default and the fallback.
+func (m *MemoryManager) SetRanker(ranker MemoryRanker) { m.ranker = ranker }
+
+// Ranker reports the installed ranker, or nil.
+func (m *MemoryManager) Ranker() MemoryRanker { return m.ranker }
 
 func (m *MemoryManager) now() time.Time {
 	if m.clock == nil {
@@ -75,6 +85,25 @@ func (m *MemoryManager) Retrieve(auth AuthContext, query string, namespace strin
 	latest, err := m.liveRecords(auth, namespace)
 	if err != nil {
 		return nil, err
+	}
+	if m.ranker != nil {
+		// The ranker decides relevance, so it must see every live record. A
+		// lexical pre-filter here would drop exactly the records a ranker
+		// exists to find — the ones sharing no token with the query.
+		candidates := make([]MemoryRecord, 0, len(latest))
+		for _, r := range latest {
+			candidates = append(candidates, r)
+		}
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return candidates[i].Namespace+"\x00"+candidates[i].Key < candidates[j].Namespace+"\x00"+candidates[j].Key
+		})
+		ranked, err := m.ranker.Rank(context.Background(), query, candidates)
+		if err == nil {
+			return ranked, nil
+		}
+		// A ranker is an enhancement, not a dependency: failing retrieval
+		// because an embedding service is down would turn a degraded answer
+		// into no answer at all.
 	}
 	type scoredMemory struct {
 		record MemoryRecord
