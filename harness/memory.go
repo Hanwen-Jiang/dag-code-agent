@@ -72,28 +72,9 @@ func (m *MemoryManager) Write(auth AuthContext, memoryType, namespace, key, cont
 	return r, nil
 }
 func (m *MemoryManager) Retrieve(auth AuthContext, query string, namespace string) ([]MemoryRecord, error) {
-	records, err := m.Store.MemoryRecords(auth, namespace)
+	latest, err := m.liveRecords(auth, namespace)
 	if err != nil {
 		return nil, err
-	}
-	now := m.now()
-	latest := map[string]MemoryRecord{}
-	seen := map[string]bool{}
-	for _, r := range records {
-		key := r.Namespace + "\x00" + r.Key
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		if r.Tombstone {
-			continue
-		}
-		if r.ExpiresAt != "" {
-			if expiry, e := time.Parse(time.RFC3339Nano, r.ExpiresAt); e == nil && expiry.Before(now) {
-				continue
-			}
-		}
-		latest[key] = r
 	}
 	type scoredMemory struct {
 		record MemoryRecord
@@ -128,4 +109,67 @@ func (m *MemoryManager) Forget(auth AuthContext, id string) (bool, error) {
 		return false, errors.New("memory store is nil")
 	}
 	return m.Store.TombstoneMemory(auth, id)
+}
+
+// liveRecords projects the store's rows into the live view of a namespace: the
+// current version of each key, with tombstones and expired entries removed.
+//
+// Retrieve and List share this rather than each filtering for itself. Two copies
+// of the rule would drift, and the way they would drift is the dangerous
+// direction — one of them returning a tombstoned or expired record as live.
+//
+// The first row for a key wins. That is not an arbitrary choice: the store
+// returns newest first, so "first" is "latest version". Reversing it here would
+// silently resurrect superseded content.
+func (m *MemoryManager) liveRecords(auth AuthContext, namespace string) (map[string]MemoryRecord, error) {
+	records, err := m.Store.MemoryRecords(auth, namespace)
+	if err != nil {
+		return nil, err
+	}
+	now := m.now()
+	latest := map[string]MemoryRecord{}
+	seen := map[string]bool{}
+	for _, r := range records {
+		key := r.Namespace + "\x00" + r.Key
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if r.Tombstone {
+			continue
+		}
+		if r.ExpiresAt != "" {
+			if expiry, e := time.Parse(time.RFC3339Nano, r.ExpiresAt); e == nil && expiry.Before(now) {
+				continue
+			}
+		}
+		latest[key] = r
+	}
+	return latest, nil
+}
+
+// List returns every live record in a namespace, ordered by key.
+//
+// It exists because Retrieve answers "what is relevant to this query" and a
+// caller sometimes needs "what is there". Enumerating memories to index them for
+// semantic search is the motivating case, and it cannot be expressed as a query:
+// an empty query happens to match everything today, but that is a property of the
+// scoring rule rather than a promise about enumeration.
+//
+// The order is deterministic so an index built from it is reproducible.
+func (m *MemoryManager) List(auth AuthContext, namespace string) ([]MemoryRecord, error) {
+	latest, err := m.liveRecords(auth, namespace)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]MemoryRecord, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, latest[key])
+	}
+	return out, nil
 }

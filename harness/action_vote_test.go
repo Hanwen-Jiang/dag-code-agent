@@ -12,17 +12,18 @@ import (
 
 // votingModel answers the same objective with an answer chosen per agent, so a
 // vote has something to decide between.
-type votingModel struct {
-	calls map[string]int
-}
+// votingModel answers the same objective differently per agent so a vote has
+// something to decide between.
+//
+// It holds no state: an earlier version counted calls in a plain map, which the
+// race detector correctly flagged because voters run concurrently. The counter
+// was never read, so the fix was to delete it rather than to lock it — adding a
+// mutex would have preserved dead state and hidden the real lesson.
+type votingModel struct{}
 
 func (m *votingModel) Name() string { return "voting" }
 
 func (m *votingModel) Complete(_ context.Context, request ModelRequest) (ModelResponse, error) {
-	if m.calls == nil {
-		m.calls = map[string]int{}
-	}
-	m.calls[request.TaskID]++
 	text := requestText(request)
 	switch {
 	case contains(text, "VOTE-QUESTION"):
