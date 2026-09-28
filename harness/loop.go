@@ -62,6 +62,8 @@ var knownEventTypes = []string{
 	"SUBAGENT_FAILED",
 	"SUBAGENT_REJECTED",
 	"SUBAGENTS_MERGED",
+	// Emitted when a strategy resolves tool schemas explicitly.
+	"TOOL_SEARCHED",
 	"TOOLS_EXECUTED",
 	"SUBAGENTS_REQUESTED",
 	"VERIFIER_REJECTED",

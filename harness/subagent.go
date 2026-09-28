@@ -307,7 +307,7 @@ func (s *subagentRunner) childLedger() *BudgetLedger {
 
 // mergeSubagentResults aggregates a fan-out into the payload recorded on the
 // parent and injected into its context.
-func mergeSubagentResults(results []SubagentResult, requireConsensus bool) map[string]any {
+func mergeSubagentResults(results []SubagentResult, requireConsensus bool, majority bool) map[string]any {
 	if len(results) == 0 {
 		return map[string]any{"status": "FAILED", "error": "NO_SUBAGENTS"}
 	}
@@ -324,6 +324,19 @@ func mergeSubagentResults(results []SubagentResult, requireConsensus bool) map[s
 		summaries[key]++
 	}
 	merged := map[string]any{"status": status, "count": len(results), "results": results}
+	if majority {
+		// A vote resolves rather than reports: the winning answer is what the
+		// parent should act on, and the tally is kept so a split decision is
+		// visible rather than hidden behind the winner.
+		winner, count, tied := majoritySummary(results)
+		merged["winner"] = winner
+		merged["winner_votes"] = count
+		merged["tied"] = tied
+		if tied {
+			merged["status"] = "CONFLICT"
+		}
+		return merged
+	}
 	if requireConsensus && len(summaries) > 1 {
 		// Disagreement is reported rather than averaged away: a silent merge of
 		// conflicting conclusions is worse than an explicit conflict.
@@ -339,3 +352,33 @@ func mergeSubagentResults(results []SubagentResult, requireConsensus bool) map[s
 
 // ErrSubagentDepthExceeded reports a fan-out beyond the configured depth.
 var ErrSubagentDepthExceeded = errors.New("SUBAGENT_DEPTH_EXCEEDED")
+
+// majoritySummary picks the most common successful answer.
+//
+// Only successful children vote: a failed child has no answer to contribute, and
+// counting its empty summary would let failures outvote a real answer. A tie is
+// reported rather than broken arbitrarily, because choosing between equally
+// supported answers is a decision the parent should make knowingly.
+func majoritySummary(results []SubagentResult) (winner string, count int, tied bool) {
+	tally := map[string]int{}
+	best := ""
+	for _, result := range results {
+		if result.Status != "SUCCEEDED" {
+			continue
+		}
+		answer := strings.TrimSpace(result.Summary)
+		if answer == "" {
+			continue
+		}
+		tally[answer]++
+		if tally[answer] > count {
+			best, count = answer, tally[answer]
+		}
+	}
+	for answer, votes := range tally {
+		if votes == count && answer != best {
+			tied = true
+		}
+	}
+	return best, count, tied
+}

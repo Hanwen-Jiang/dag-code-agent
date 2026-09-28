@@ -149,6 +149,28 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 			}
 			view = k.strategy.OnResult(k.refresh(view, state), result)
 
+		case ActionVote:
+			// Several children answer the same question and the parent acts on
+			// the majority. The voters are ordinary subagent specs, so a vote
+			// costs the same as a fan-out and reuses its durability.
+			result, nextState, terminal := k.executeFanout(ctx, state, state.Step, action.Subagents, "vote")
+			state = nextState
+			if terminal != nil {
+				return *terminal
+			}
+			view = k.strategy.OnResult(k.refresh(view, state), result)
+
+		case ActionSearchTools:
+			// The strategy asks for tool schemas explicitly, which is what makes
+			// a deferred catalogue usable by a strategy rather than only by the
+			// model.
+			result, nextState, terminal := k.stepSearchTools(ctx, state, action.Search)
+			state = nextState
+			if terminal != nil {
+				return *terminal
+			}
+			view = k.strategy.OnResult(k.refresh(view, state), result)
+
 		case ActionAskUser:
 			return k.stepAskUser(state, view.NeedUser)
 
@@ -699,7 +721,7 @@ func (k *loopKernel) executeFanout(ctx context.Context, state TaskState, stepNum
 		}
 	}
 
-	merged := mergeSubagentResults(results, policy.RequireConsensus)
+	merged := mergeSubagentResults(results, policy.RequireConsensus, origin == "vote")
 	if err := r.commitEvent(&state, "SUBAGENTS_MERGED", map[string]any{
 		"turn_id": state.CurrentTurnID, "step": stepNumber, "merged": merged,
 	}); err != nil {
@@ -714,4 +736,44 @@ func (k *loopKernel) executeFanout(ctx context.Context, state TaskState, stepNum
 		return StepResult{}, state, &result
 	}
 	return StepResult{Action: ActionCallModel, SubagentResults: results}, state, nil
+}
+
+// stepSearchTools resolves a tool query into schemas and hands them to the model.
+//
+// It calls the same tool_search handler the model would call, so a strategy has
+// no privileged path: the query is subject to the same scope filtering, and it
+// cannot surface a tool the caller is not allowed to use.
+func (k *loopKernel) stepSearchTools(ctx context.Context, state TaskState, query string) (StepResult, TaskState, *RunResult) {
+	r := k.runtime
+	if r.tools == nil || r.tools.Registry == nil {
+		result := r.failAndCommit(state, "STRATEGY", errors.New("SEARCH_TOOLS_UNAVAILABLE: no tool registry"))
+		return StepResult{}, state, &result
+	}
+	spec, ok := r.tools.Registry.Get(toolSearchToolName)
+	if !ok {
+		// Telling the strategy how to fix this is more useful than a bare
+		// failure, because the resolver is opt-in.
+		result := r.failAndCommit(state, "STRATEGY", fmt.Errorf("SEARCH_TOOLS_UNAVAILABLE: %s is not registered; enable WithToolCatalogThreshold", toolSearchToolName))
+		return StepResult{}, state, &result
+	}
+	value, err := spec.Handler(map[string]any{"query": query}, k.auth)
+	if err != nil {
+		result := r.failAndCommit(state, "TOOL", err)
+		return StepResult{}, state, &result
+	}
+	observation := map[string]any{"type": "tool_search", "query": query, "result": value}
+	state.Observations = append(state.Observations, observation)
+	if err := r.commitEvent(&state, "TOOL_SEARCHED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": state.Step, "query": query, "result": value,
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": state.Step, "outcome": "tool_search",
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	return StepResult{Action: ActionSearchTools}, state, nil
 }
