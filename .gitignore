@@ -11,3 +11,9 @@ frontend/node_modules/
 examples/embed_external/external-consumer
 .gocache/
 .gomodcache/
+/llm-service
+/self-evolution
+/xai-dashboard
+/agent-core
+/agent-harness
+/agent-dag

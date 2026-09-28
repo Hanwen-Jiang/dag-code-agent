@@ -39,6 +39,10 @@ type loopKernel struct {
 	// rng is the sanctioned randomness source. It is seeded from the task id and
 	// strategy so a replayed run draws the same numbers.
 	rng *rand.Rand
+	// ctx is the run's context. Terminal branches commit TURN_COMPLETED through
+	// it so the per-run observation channel can report how many frames it had
+	// to drop (see turnCompletedPayload in stream.go).
+	ctx context.Context
 }
 
 // run is the kernel loop. It returns exactly what the pre-strategy loop
@@ -47,12 +51,13 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 	r := k.runtime
 	request := k.request
 	taskID := state.TaskID
+	k.ctx = ctx
 
-	// Loop-detection counters for this task (preserved from the inline loop).
-	seen := r.loopSeen[taskID]
-	if seen == nil {
-		seen = map[string]int{}
-		r.loopSeen[taskID] = seen
+	// Loop detection is owned by the guard, which keeps its own per-task
+	// history. Clearing it when the run ends bounds that state and gives a
+	// resumed turn a fresh window.
+	if r.loopGuard != nil {
+		defer r.loopGuard.Reset(taskID)
 	}
 	// The strategy sees a read-only projection of the task state.
 	view := k.loopState(state)
@@ -63,7 +68,7 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 		case <-ctx.Done():
 			state.Status = TaskCancelled
 			state.LastError = map[string]any{"code": "CANCELLED", "message": ctx.Err().Error()}
-			_ = r.commitEvent(&state, "TURN_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "status": TaskCancelled, "reason": "context_cancelled"})
+			_ = r.commitEvent(&state, "TURN_COMPLETED", r.turnCompletedPayload(ctx, map[string]any{"turn_id": state.CurrentTurnID, "status": TaskCancelled, "reason": "context_cancelled"}))
 			_ = r.commitEvent(&state, "TASK_CANCELLED", state.LastError)
 			return r.result(state, "")
 		default:
@@ -79,7 +84,7 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 
 		switch action.Kind {
 		case ActionCallModel:
-			result, nextState, terminal := k.stepModel(ctx, state, seen)
+			result, nextState, terminal := k.stepModel(ctx, state)
 			state = nextState
 			if terminal != nil {
 				return *terminal
@@ -89,7 +94,7 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 		case ActionCallTools:
 			// A step that runs tools without asking the model. Strategies that
 			// want this (plan-execute, retry-a-tool) emit it explicitly.
-			result, nextState, terminal := k.stepTools(ctx, state, action.Tools, seen)
+			result, nextState, terminal := k.stepTools(ctx, state, action.Tools)
 			state = nextState
 			if terminal != nil {
 				return *terminal
@@ -143,7 +148,7 @@ func (k *loopKernel) refresh(view LoopState, state TaskState) LoopState {
 //
 // It returns the StepResult for the strategy, the updated state, and a
 // non-nil result when the run reached a terminal state inside the step.
-func (k *loopKernel) stepModel(ctx context.Context, state TaskState, seen map[string]int) (StepResult, TaskState, *RunResult) {
+func (k *loopKernel) stepModel(ctx context.Context, state TaskState) (StepResult, TaskState, *RunResult) {
 	r := k.runtime
 	request := k.request
 	stepNumber := state.Step + 1
@@ -198,7 +203,7 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState, seen map[st
 	}
 
 	started := r.clock.Now()
-	response, err := r.model.Complete(ctx, modelRequest)
+	response, err := r.completeModel(ctx, &state, modelRequest)
 	if err != nil {
 		category := "MODEL"
 		if me, ok := err.(*ModelError); ok && !me.Retryable {
@@ -241,7 +246,7 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState, seen map[st
 		return StepResult{Action: ActionCallModel, Model: &model, ModelText: response.Text, NeedUser: response.NeedUser}, state, nil
 	}
 	if len(response.ToolCalls) > 0 {
-		result, nextState, terminal := k.stepTools(ctx, state, response.ToolCalls, seen)
+		result, nextState, terminal := k.stepTools(ctx, state, response.ToolCalls)
 		result.Model = &model
 		result.ModelText = response.Text
 		return result, nextState, terminal
@@ -295,7 +300,7 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState, seen map[st
 }
 
 // stepTools runs a batch of tool calls and commits the observations.
-func (k *loopKernel) stepTools(ctx context.Context, state TaskState, calls []ToolCall, seen map[string]int) (StepResult, TaskState, *RunResult) {
+func (k *loopKernel) stepTools(ctx context.Context, state TaskState, calls []ToolCall) (StepResult, TaskState, *RunResult) {
 	r := k.runtime
 	request := k.request
 	stepNumber := state.Step
@@ -304,19 +309,21 @@ func (k *loopKernel) stepTools(ctx context.Context, state TaskState, calls []Too
 		result := r.failAndCommit(state, "BUDGET", errors.New("TOOL_BUDGET_EXCEEDED"))
 		return StepResult{}, state, &result
 	}
+	// Loop detection runs before anything executes, so a batch the guard has
+	// already flagged does not spend budget confirming what it suspects.
+	guarded, terminal := k.applyLoopGuard(state, calls)
+	if terminal != nil {
+		return StepResult{}, guarded, terminal
+	}
+	state = guarded
+
 	// A batch only runs concurrently when every member declares itself safe.
 	if r.tools.batchCanRunConcurrently(calls) {
-		return k.stepToolsConcurrent(ctx, state, calls, seen)
+		return k.stepToolsConcurrent(ctx, state, calls)
 	}
 	toolObservations := []map[string]any{}
 	results := make([]ToolResult, 0, len(calls))
 	for _, call := range calls {
-		fingerprint, _ := Digest(map[string]any{"name": call.Name, "arguments": call.Arguments})
-		seen[fingerprint]++
-		if seen[fingerprint] > 3 {
-			result := r.failAndCommit(state, "LOOP", errors.New("LOOP_DETECTED"))
-			return StepResult{}, state, &result
-		}
 		if err := r.commitEvent(&state, "TOOL_INVOKED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "call": toolCallPayload(call)}); err != nil {
 			result := r.failAndCommit(state, "STORE", err)
 			return StepResult{}, state, &result
@@ -362,7 +369,7 @@ func (k *loopKernel) stepAskUser(state TaskState, gate map[string]any) RunResult
 	if err := r.commitEvent(&state, "USER_GATE_OPENED", map[string]any{"turn_id": state.CurrentTurnID, "gate": gate}); err != nil {
 		return r.failAndCommit(state, "STORE", err)
 	}
-	_ = r.commitEvent(&state, "TURN_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "status": TaskWaitingUser})
+	_ = r.commitEvent(&state, "TURN_COMPLETED", r.turnCompletedPayload(k.ctx, map[string]any{"turn_id": state.CurrentTurnID, "status": TaskWaitingUser}))
 	return r.result(state, "")
 }
 
@@ -384,7 +391,7 @@ func (k *loopKernel) stepFinish(state TaskState, finish *FinishSpec) RunResult {
 	if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": state.Step, "outcome": "final"}); err != nil {
 		return r.failAndCommit(state, "STORE", err)
 	}
-	if err := r.commitEvent(&state, "TURN_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "status": TaskCompleted}); err != nil {
+	if err := r.commitEvent(&state, "TURN_COMPLETED", r.turnCompletedPayload(k.ctx, map[string]any{"turn_id": state.CurrentTurnID, "status": TaskCompleted})); err != nil {
 		return r.failAndCommit(state, "STORE", err)
 	}
 	if err := r.commitEvent(&state, "TASK_COMPLETED", map[string]any{"final_answer": finish.Answer, "model_round": state.ModelRound, "turn_id": state.CurrentTurnID}); err != nil {
@@ -410,20 +417,9 @@ func stringValueOr(value, fallback string) string {
 // The batch events are emitted only here, which is why a single-tool step (or a
 // batch containing an undeclared tool) keeps the exact event sequence it had
 // before parallel execution existed.
-func (k *loopKernel) stepToolsConcurrent(ctx context.Context, state TaskState, calls []ToolCall, seen map[string]int) (StepResult, TaskState, *RunResult) {
+func (k *loopKernel) stepToolsConcurrent(ctx context.Context, state TaskState, calls []ToolCall) (StepResult, TaskState, *RunResult) {
 	r := k.runtime
 	stepNumber := state.Step
-
-	// Loop detection runs in request order before anything executes, so the
-	// counter cannot depend on completion order.
-	for _, call := range calls {
-		fingerprint, _ := Digest(map[string]any{"name": call.Name, "arguments": call.Arguments})
-		seen[fingerprint]++
-		if seen[fingerprint] > 3 {
-			result := r.failAndCommit(state, "LOOP", errors.New("LOOP_DETECTED"))
-			return StepResult{}, state, &result
-		}
-	}
 
 	batch := make([]map[string]any, 0, len(calls))
 	for _, call := range calls {
@@ -489,4 +485,56 @@ func (k *loopKernel) stepToolsConcurrent(ctx context.Context, state TaskState, c
 		return StepResult{}, state, &result
 	}
 	return StepResult{Action: ActionCallTools, Tools: results}, state, nil
+}
+
+// applyLoopGuard consults the loop guard for a batch about to run.
+//
+// The guard is the only component that decides a run is stuck. Its Nudge verdict
+// is the reason the seam exists at all: the previous implementation could only
+// kill the task, whereas a nudge tells the model what pattern it repeated and
+// lets it try something else. A nudge skips the batch — re-running a call the
+// guard has already flagged as unproductive spends budget to reinforce the loop.
+//
+// The returned RunResult is non-nil only for a terminal verdict. A nudge returns
+// the state with the directive recorded and no terminal result.
+func (k *loopKernel) applyLoopGuard(state TaskState, calls []ToolCall) (TaskState, *RunResult) {
+	r := k.runtime
+	if r.loopGuard == nil || len(calls) == 0 {
+		return state, nil
+	}
+	verdict := r.loopGuard.Check(LoopObservation{
+		TaskID:    state.TaskID,
+		Step:      state.Step,
+		ToolCalls: calls,
+	})
+	switch verdict.Decision {
+	case LoopForceStop:
+		err := errors.New("LOOP_DETECTED")
+		if verdict.Message != "" {
+			err = fmt.Errorf("LOOP_DETECTED: %s", verdict.Message)
+		}
+		result := r.failAndCommit(state, "LOOP", err)
+		return state, &result
+	case LoopNudge:
+		directive := verdict.Directive()
+		state.Observations = append(state.Observations, map[string]any{
+			"type": "loop_nudge", "message": verdict.Message, "evidence": verdict.Evidence, "directive": directive,
+		})
+		if err := r.commitEvent(&state, "LOOP_NUDGE", map[string]any{
+			"turn_id": state.CurrentTurnID, "step": state.Step,
+			"message": verdict.Message, "evidence": verdict.Evidence, "directive": directive,
+		}); err != nil {
+			result := r.failAndCommit(state, "STORE", err)
+			return state, &result
+		}
+		if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{
+			"turn_id": state.CurrentTurnID, "step": state.Step, "outcome": "loop_nudge",
+		}); err != nil {
+			result := r.failAndCommit(state, "STORE", err)
+			return state, &result
+		}
+		return state, nil
+	default:
+		return state, nil
+	}
 }

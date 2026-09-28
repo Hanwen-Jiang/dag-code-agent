@@ -25,6 +25,10 @@ type Server struct {
 	sessionFactory func(string, harness.TaskRequest, harness.AuthContext) (*harness.DemoEnvironment, error)
 	runsMu       sync.RWMutex
 	runs         map[string]*harnessSession
+	// stream fans ephemeral model tokens out to SSE clients that opted in with
+	// ?include=text. See stream.go: it is the only cross-goroutine channel
+	// between a running session and a request handler.
+	stream *streamHub
 }
 type harnessSession struct {
 	mu   sync.Mutex
@@ -122,7 +126,13 @@ func New(cfg Config) (http.Handler, error) {
 		DAGLoadError:   cfg.DAGLoadError,
 		sessionFactory: factory,
 		runs:           map[string]*harnessSession{},
+		stream:         newStreamHub(),
 	}
+	// Every session runtime gets the hub as its runtime-level observation
+	// channel. The hub only asks the model layer to stream for tasks that
+	// actually have a subscriber, so a client that never sends ?include=text
+	// keeps the exact journal (and the exact cost) it had before streaming.
+	server.sessionFactory = server.withStreamObservations(factory)
 	mux := http.NewServeMux()
 	prefix := strings.TrimSuffix(cfg.RoutePrefix, "/")
 	mount := func(pattern string, handler http.HandlerFunc) {
@@ -299,7 +309,7 @@ func (s *Server) harnessRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) >= 2 && parts[1] == "events" && r.Method == http.MethodGet {
 		if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
-			writeHarnessSSE(r.Context(), w, s.HarnessStore, taskID, eventCursor(r), r.URL.Query().Get("follow") == "1")
+			s.writeHarnessSSE(r.Context(), w, taskID, eventCursor(r), r.URL.Query().Get("follow") == "1", includeText(r))
 			return
 		}
 		events, eventErr := s.HarnessStore.EventsSince(taskID, eventCursor(r))
@@ -437,7 +447,26 @@ func eventCursor(r *http.Request) int {
 	return cursor
 }
 
-func writeHarnessSSE(ctx context.Context, w http.ResponseWriter, store harness.CoreStore, taskID string, after int, follow bool) {
+// writeHarnessSSE streams a task's events as SSE frames.
+//
+// The authoritative frames always come from the journal poll, exactly as
+// before. With includeText=true ephemeral token frames are interleaved on top:
+// a reconnect therefore loses only tokens, never events (design §3.4).
+func (s *Server) writeHarnessSSE(ctx context.Context, w http.ResponseWriter, taskID string, after int, follow, text bool) {
+	var (
+		subscription *streamSubscription
+		tokens       <-chan harness.Chunk
+		reported     int64
+	)
+	if text && s.stream != nil {
+		// Subscribe before the first flush: the client cannot observe the
+		// response until the headers go out, which makes that flush the
+		// handshake that the subscriber is in place for this run.
+		subscription = s.stream.subscribe(taskID, defaultSubscriberBuffer)
+		tokens = subscription.chunks
+		defer subscription.Close()
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -449,10 +478,46 @@ func writeHarnessSSE(ctx context.Context, w http.ResponseWriter, store harness.C
 	if flusher != nil {
 		flusher.Flush()
 	}
+
+	// reportDropped makes token loss visible instead of silent.
+	reportDropped := func() {
+		if subscription == nil {
+			return
+		}
+		if dropped := subscription.Dropped(); dropped > reported {
+			writeStreamDroppedFrame(w, flusher, dropped-reported)
+			reported = dropped
+		}
+	}
+	// drainTokens writes whatever is already buffered. It reports false when
+	// the subscription has been closed.
+	drainTokens := func() bool {
+		for {
+			select {
+			case chunk, ok := <-tokens:
+				if !ok {
+					tokens = nil
+					return false
+				}
+				if chunk.Kind == harness.ChunkText && chunk.Text != "" {
+					payload, _ := json.Marshal(map[string]any{"text": chunk.Text})
+					if _, err := fmt.Fprintf(w, "event: token\ndata: %s\n\n", payload); err != nil {
+						return false
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
+			default:
+				return true
+			}
+		}
+	}
+
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		events, err := store.EventsSince(taskID, after)
+		events, err := s.HarnessStore.EventsSince(taskID, after)
 		if err != nil {
 			return
 		}
@@ -466,13 +531,36 @@ func writeHarnessSSE(ctx context.Context, w http.ResponseWriter, store harness.C
 				flusher.Flush()
 			}
 		}
-		state, _, stateErr := store.GetTask(taskID)
+		if tokens != nil {
+			drainTokens()
+			reportDropped()
+		}
+		state, _, stateErr := s.HarnessStore.GetTask(taskID)
 		if !follow || (stateErr == nil && (state.Status == harness.TaskCompleted || state.Status == harness.TaskFailed || state.Status == harness.TaskCancelled)) {
+			// The run is over, so one last drain loses no trailing token.
+			if tokens != nil {
+				drainTokens()
+				reportDropped()
+			}
 			return
 		}
 		select {
 		case <-ctx.Done():
 			return
+		case chunk, ok := <-tokens:
+			if !ok {
+				tokens = nil
+				continue
+			}
+			if chunk.Kind == harness.ChunkText && chunk.Text != "" {
+				payload, _ := json.Marshal(map[string]any{"text": chunk.Text})
+				if _, err := fmt.Fprintf(w, "event: token\ndata: %s\n\n", payload); err != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 		case <-ticker.C:
 		}
 	}

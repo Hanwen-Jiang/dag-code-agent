@@ -44,12 +44,18 @@ var knownEventTypes = []string{
 	"CONTEXT_COMPILED",
 	"MODEL_REQUESTED",
 	"MODEL_PROPOSED",
+	// Emitted only when an injected streaming observer saw no output before the
+	// stream failed and the step fell back to Complete. It records a degraded
+	// observation path, never a different model result.
+	"MODEL_STREAM_DEGRADED",
 	"TOOL_INVOKED",
 	"TOOL_OBSERVED",
 	// Emitted only when a batch actually runs concurrently, so a single-tool
 	// step keeps the event sequence it had before parallel execution existed.
 	"TOOL_BATCH_STARTED",
 	"TOOL_BATCH_COMPLETED",
+	// Emitted when the loop guard warns instead of terminating.
+	"LOOP_NUDGE",
 	"TOOLS_EXECUTED",
 	"SUBAGENTS_REQUESTED",
 	"VERIFIER_REJECTED",

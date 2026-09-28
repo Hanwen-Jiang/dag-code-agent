@@ -35,6 +35,29 @@ type runtimeConfig struct {
 	strategy       Strategy
 	strategyName   string
 	newID          func(string) string
+	// emitter is the runtime-level observation channel installed by
+	// WithEmitter (declared in stream.go).
+	emitter Emitter
+	// loopGuard detects stuck runs; nil selects the detector-backed default.
+	loopGuard LoopGuard
+	// skillResolver overrides the context compiler's skill source.
+	skillResolver SkillResolver
+	// streamBuffer overrides the per-run observation buffer.
+	streamBuffer int
+}
+
+// WithStreamBuffer sets how many observation frames a streamed run may queue
+// ahead of its consumer. Frames beyond it are dropped and counted rather than
+// blocking the run (design §3.3), so a consumer that keeps up can raise this,
+// and a test that needs to observe the drop path can lower it.
+func WithStreamBuffer(frames int) Option {
+	return func(c *runtimeConfig) error {
+		if frames < 1 {
+			return errors.New("harness: WithStreamBuffer requires a positive frame count")
+		}
+		c.streamBuffer = frames
+		return nil
+	}
 }
 
 // WithStore injects the persistence backend. Without it, New creates a
@@ -318,6 +341,9 @@ func New(opts ...Option) (*Runtime, error) {
 	// Reuse the artifact projection for context spill: it is already
 	// content-addressed, idempotent and tenant-scoped, which is everything the
 	// spill level needs.
+	if cfg.skillResolver != nil {
+		cfg.contextBuilder.Skills = cfg.skillResolver
+	}
 	if cfg.contextBuilder.Spill == nil {
 		if artifacts, ok := cfg.store.(ArtifactStore); ok {
 			cfg.contextBuilder.Spill = artifactSpillStore{artifacts: artifacts}
@@ -334,6 +360,15 @@ func New(opts ...Option) (*Runtime, error) {
 	}
 	if cfg.newID == nil {
 		cfg.newID = NewID
+	}
+	if cfg.streamBuffer <= 0 {
+		cfg.streamBuffer = defaultStreamBuffer
+	}
+	if cfg.loopGuard == nil {
+		// The detector-backed guard is the default because loop detection is a
+		// correctness concern, not an optional enhancement: the run has to be
+		// able to stop itself, and the detectors also know how to warn first.
+		cfg.loopGuard = newDetectorLoopGuard()
 	}
 	if cfg.strategies == nil {
 		cfg.strategies = NewStrategyRegistry(ReActStrategy{})
@@ -377,6 +412,8 @@ func New(opts ...Option) (*Runtime, error) {
 		strategies:     cfg.strategies,
 		strategy:       cfg.strategy,
 		newID:          cfg.newID,
-		loopSeen:       map[string]map[string]int{},
+		emitter:        cfg.emitter,
+		loopGuard:      cfg.loopGuard,
+		streamBuffer:   cfg.streamBuffer,
 	}, nil
 }

@@ -11,9 +11,12 @@ var ErrContextBudget = errors.New("CONTEXT_BUDGET_EXCEEDED")
 
 type ContextBuilder struct {
 	Memories *MemoryManager
-	Skills   *SkillRegistry
-	Tools    *ToolRegistry
-	Cache    *PrefixCache
+	// Skills is the skill source. The interface is satisfied by *SkillRegistry
+	// as well as by the managed resolver over packages/skills, so widening it
+	// changed nothing for existing callers.
+	Skills SkillResolver
+	Tools  *ToolRegistry
+	Cache  *PrefixCache
 	// Compactor summarizes context that no longer fits. Nil selects the
 	// deterministic extractive default.
 	Compactor Compactor

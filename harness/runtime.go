@@ -62,12 +62,20 @@ type Runtime struct {
 	// names resolve against.
 	strategy   Strategy
 	strategies *StrategyRegistry
+	// loopGuard decides when a run is stuck.
+	loopGuard LoopGuard
+	// streamBuffer bounds a streamed run's observation queue.
+	streamBuffer int
 	// newID generates identifiers created during a run; injectable so a
 	// deterministic test can assert a byte-identical journal.
 	newID func(string) string
+	// emitter is the optional runtime-level observation channel (see
+	// WithEmitter/SetEmitter in stream.go). It is read while a run holds mu,
+	// which is what serializes it against SetEmitter; a nil emitter means the
+	// run never leaves the modelled Complete path.
+	emitter Emitter
 
-	mu       sync.Mutex
-	loopSeen map[string]map[string]int
+	mu sync.Mutex
 }
 
 // Store returns the persistence backend (read-only use).
@@ -98,6 +106,9 @@ func (r *Runtime) id(prefix string) string {
 	}
 	return r.newID(prefix)
 }
+
+// LoopGuard returns the guard deciding when a run is stuck.
+func (r *Runtime) LoopGuard() LoopGuard { return r.loopGuard }
 
 // Strategy returns the loop topology this runtime runs.
 func (r *Runtime) Strategy() Strategy { return r.strategy }
