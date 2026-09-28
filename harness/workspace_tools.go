@@ -33,21 +33,21 @@ func (w *WorkspaceTools) Register(registry *ToolRegistry) error {
 		return errors.New("WORKSPACE_TOOLS_REQUIRED")
 	}
 	if err := registry.Register(ToolSpec{
-		Name: "workspace_list", Description: "list files in the code workspace", RequiredScopes: []string{"workspace:read"},
+		Name: "workspace_list", ConcurrencySafe: true, SideEffect: "NONE", Description: "list files in the code workspace", RequiredScopes: []string{"workspace:read"},
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "depth": map[string]any{"type": "integer"}}, "additionalProperties": false},
 		Handler:     func(args map[string]any, _ AuthContext) (any, error) { return w.list(args) },
 	}); err != nil {
 		return err
 	}
 	if err := registry.Register(ToolSpec{
-		Name: "workspace_read", Description: "read a text file from the code workspace", RequiredScopes: []string{"workspace:read"},
+		Name: "workspace_read", ConcurrencySafe: true, SideEffect: "NONE", Description: "read a text file from the code workspace", RequiredScopes: []string{"workspace:read"},
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "max_bytes": map[string]any{"type": "integer"}}, "required": []string{"path"}, "additionalProperties": false},
 		Handler:     func(args map[string]any, _ AuthContext) (any, error) { return w.read(args) },
 	}); err != nil {
 		return err
 	}
 	if err := registry.Register(ToolSpec{
-		Name: "workspace_search", Description: "search text in the code workspace", RequiredScopes: []string{"workspace:read"},
+		Name: "workspace_search", ConcurrencySafe: true, SideEffect: "NONE", Description: "search text in the code workspace", RequiredScopes: []string{"workspace:read"},
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}, "glob": map[string]any{"type": "string"}}, "required": []string{"query"}, "additionalProperties": false},
 		Handler:     func(args map[string]any, _ AuthContext) (any, error) { return w.search(args) },
 	}); err != nil {

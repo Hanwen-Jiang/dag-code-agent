@@ -258,16 +258,20 @@ func (r ToolResult) OK() bool { return r.Status == ToolSucceeded }
 type ToolHandler func(arguments map[string]any, auth AuthContext) (any, error)
 
 type ToolSpec struct {
-	Name                string         `json:"name"`
-	Description         string         `json:"description"`
-	InputSchema         map[string]any `json:"input_schema"`
-	Handler             ToolHandler    `json:"-"`
-	RequiredScopes      []string       `json:"required_scopes,omitempty"`
-	SideEffect          string         `json:"side_effect"`
-	IdempotencyRequired bool           `json:"idempotency_required,omitempty"`
-	TimeoutSeconds      float64        `json:"timeout_seconds"`
-	MaxRetries          int            `json:"max_retries"`
-	Tags                []string       `json:"tags,omitempty"`
+	Name           string         `json:"name"`
+	Description    string         `json:"description"`
+	InputSchema    map[string]any `json:"input_schema"`
+	Handler        ToolHandler    `json:"-"`
+	RequiredScopes []string       `json:"required_scopes,omitempty"`
+	SideEffect     string         `json:"side_effect"`
+	// ConcurrencySafe lets a batch run this tool alongside its siblings.
+	// Undeclared means unsafe: an unlabelled tool may write, so the kernel
+	// serializes it rather than reordering an effect nobody described.
+	ConcurrencySafe     bool     `json:"concurrency_safe,omitempty"`
+	IdempotencyRequired bool     `json:"idempotency_required,omitempty"`
+	TimeoutSeconds      float64  `json:"timeout_seconds"`
+	MaxRetries          int      `json:"max_retries"`
+	Tags                []string `json:"tags,omitempty"`
 }
 
 func (t ToolSpec) SchemaForModel() map[string]any {

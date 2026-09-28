@@ -46,6 +46,10 @@ var knownEventTypes = []string{
 	"MODEL_PROPOSED",
 	"TOOL_INVOKED",
 	"TOOL_OBSERVED",
+	// Emitted only when a batch actually runs concurrently, so a single-tool
+	// step keeps the event sequence it had before parallel execution existed.
+	"TOOL_BATCH_STARTED",
+	"TOOL_BATCH_COMPLETED",
 	"TOOLS_EXECUTED",
 	"SUBAGENTS_REQUESTED",
 	"VERIFIER_REJECTED",

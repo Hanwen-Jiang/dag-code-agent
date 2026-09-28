@@ -82,10 +82,50 @@ type ToolRuntime struct {
 	Registry *ToolRegistry
 	Store    IdempotencyStore
 	Policy   *ExecutionPolicy
+	// MaxParallel bounds a concurrent tool batch. Zero selects the default.
+	MaxParallel int
 }
 
 func NewToolRuntime(registry *ToolRegistry, store IdempotencyStore) *ToolRuntime {
 	return &ToolRuntime{Registry: registry, Store: store}
+}
+
+// defaultToolParallelism bounds concurrent tool execution when unset.
+const defaultToolParallelism = 4
+
+// parallelism returns the effective concurrency bound.
+func (r *ToolRuntime) parallelism() int {
+	if r == nil || r.MaxParallel <= 0 {
+		return defaultToolParallelism
+	}
+	return r.MaxParallel
+}
+
+// specConcurrencySafe reports whether a tool may run alongside its siblings.
+//
+// Only an explicit declaration counts. The previous field, SideEffect, was
+// never read by any decision — "IRREVERSIBLE" was the only value in the tree and
+// nothing acted on it — so it cannot be trusted as an implicit safety signal.
+func specConcurrencySafe(spec ToolSpec) bool {
+	return spec.ConcurrencySafe
+}
+
+// batchCanRunConcurrently reports whether every call in a batch may run at once.
+//
+// A single unsafe member serializes the whole batch: running part of a batch in
+// parallel and part after it would reorder effects relative to the model's
+// request, and no test could tell that apart from a bug.
+func (r *ToolRuntime) batchCanRunConcurrently(calls []ToolCall) bool {
+	if r == nil || r.Registry == nil || len(calls) < 2 {
+		return false
+	}
+	for _, call := range calls {
+		spec, ok := r.Registry.Get(call.Name)
+		if !ok || !specConcurrencySafe(spec) {
+			return false
+		}
+	}
+	return true
 }
 
 func NewToolRuntimeWithPolicy(registry *ToolRegistry, store IdempotencyStore, policy ExecutionPolicy) *ToolRuntime {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"sync"
 )
 
 // The loop kernel executes Actions and owns every invariant: journal commits,
@@ -303,6 +304,10 @@ func (k *loopKernel) stepTools(ctx context.Context, state TaskState, calls []Too
 		result := r.failAndCommit(state, "BUDGET", errors.New("TOOL_BUDGET_EXCEEDED"))
 		return StepResult{}, state, &result
 	}
+	// A batch only runs concurrently when every member declares itself safe.
+	if r.tools.batchCanRunConcurrently(calls) {
+		return k.stepToolsConcurrent(ctx, state, calls, seen)
+	}
 	toolObservations := []map[string]any{}
 	results := make([]ToolResult, 0, len(calls))
 	for _, call := range calls {
@@ -393,4 +398,95 @@ func stringValueOr(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// stepToolsConcurrent runs a batch of declared-safe tools in parallel.
+//
+// Replay safety is the constraint that shapes this: the journal must not depend
+// on which tool happened to finish first. So the invariant is that RESULTS ARE
+// COMMITTED IN REQUEST ORDER. Execution is concurrent; the loop-detection pass,
+// the event order and the observation order are all driven by the input slice.
+//
+// The batch events are emitted only here, which is why a single-tool step (or a
+// batch containing an undeclared tool) keeps the exact event sequence it had
+// before parallel execution existed.
+func (k *loopKernel) stepToolsConcurrent(ctx context.Context, state TaskState, calls []ToolCall, seen map[string]int) (StepResult, TaskState, *RunResult) {
+	r := k.runtime
+	stepNumber := state.Step
+
+	// Loop detection runs in request order before anything executes, so the
+	// counter cannot depend on completion order.
+	for _, call := range calls {
+		fingerprint, _ := Digest(map[string]any{"name": call.Name, "arguments": call.Arguments})
+		seen[fingerprint]++
+		if seen[fingerprint] > 3 {
+			result := r.failAndCommit(state, "LOOP", errors.New("LOOP_DETECTED"))
+			return StepResult{}, state, &result
+		}
+	}
+
+	batch := make([]map[string]any, 0, len(calls))
+	for _, call := range calls {
+		batch = append(batch, toolCallPayload(call))
+	}
+	if err := r.commitEvent(&state, "TOOL_BATCH_STARTED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": stepNumber, "parallelism": r.tools.parallelism(), "calls": batch,
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	for _, call := range calls {
+		if err := r.commitEvent(&state, "TOOL_INVOKED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "call": toolCallPayload(call)}); err != nil {
+			result := r.failAndCommit(state, "STORE", err)
+			return StepResult{}, state, &result
+		}
+	}
+
+	results := make([]ToolResult, len(calls))
+	sem := make(chan struct{}, r.tools.parallelism())
+	var wg sync.WaitGroup
+	for i := range calls {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[index] = ToolResult{CallID: calls[index].CallID, Name: calls[index].Name, Status: ToolFailed, ErrorCode: "CANCELLED", ErrorMessage: ctx.Err().Error()}
+				return
+			}
+			defer func() { <-sem }()
+			results[index] = r.tools.Execute(ctx, calls[index], k.auth)
+		}(i)
+	}
+	wg.Wait()
+
+	// Observations are appended and committed in request order, so the journal
+	// is identical to a sequential run of the same batch.
+	toolObservations := []map[string]any{}
+	for i, call := range calls {
+		state.ToolCalls++
+		observation := map[string]any{"tool": call.Name, "call_id": call.CallID, "status": results[i].Status, "value": results[i].Value, "error_code": results[i].ErrorCode, "attempts": results[i].Attempts}
+		toolObservations = append(toolObservations, observation)
+		state.Observations = append(state.Observations, observation)
+		if err := r.commitEvent(&state, "TOOL_OBSERVED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "call_id": call.CallID, "observation": observation}); err != nil {
+			result := r.failAndCommit(state, "STORE", err)
+			return StepResult{}, state, &result
+		}
+	}
+	if err := r.commitEvent(&state, "TOOL_BATCH_COMPLETED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": stepNumber, "results": toolObservations,
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	if err := r.commitEvent(&state, "TOOLS_EXECUTED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "results": toolObservations}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "tool_calls"}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	return StepResult{Action: ActionCallTools, Tools: results}, state, nil
 }
