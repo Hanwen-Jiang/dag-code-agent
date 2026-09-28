@@ -810,6 +810,43 @@ nil 语义发生了变化——把 nil 的 `*SkillRegistry` 赋给接口会存�
 
 ---
 
+## 7.9 交付状态（第五至十一轮）：四个地基全部落地
+
+**S1 / S2 / S3 / S4 均已实现**，设计文档"最该先做的三件事"全部完成。
+
+| 项 | 状态 | 关键验证 |
+|---|---|---|
+| S3 取消可送达运行中任务 | ✅ | `Cancel` 曾在运行时锁后排队，只能"取消"已停止的任务 |
+| S3 取消原因可区分 | ✅ | `context.WithCancelCause`；调用者停止与看门狗干预在 journal 中不再都是 `context canceled` |
+| S3 `RunHandle` | ✅ | Start 不阻塞；`Wait` 的 context 与运行的 context **分离**（放弃等待 ≠ 决定停止） |
+| S3 Watchdog | ✅ | 超时 + 停滞两条界限；**存储读取错误不算停滞** |
+| S3 Background Agents | ✅ | 挂在运行时自有 context 上（`context.Background()` 会活过 `Close` 并泄漏）；`ResumableTasks` 做重启恢复 |
+| 动作面 | ✅ 8/10 | `Spawn`/`Handoff`/`Vote`/`SearchTools` 已实现；`Fanout`/`RunDAG` 需逐分支控制流，内核**明确拒绝** |
+| `multiagent` 接入 | ✅ | 子代理**选择**（适配度评分 + `MinAgentFit`），依赖隔离在单文件，核心依赖预算仍为 2 |
+| 流式 | ✅ | 流式与非流式产出**逐字节相同**的 `MODEL_PROPOSED` |
+| MCP 客户端 | ✅ | 真实 stdio/HTTP 传输 + 符号链接逃逸防护 |
+| orchestrator→agent-core | ✅ | 真实 WASI 经 gRPC 执行；降级路径**如实标注** |
+
+### 实现过程中挖出的缺陷（都被测试捕获，非推测）
+
+1. **策略无限循环**：内核循环以 `state.Step` 为界，而 `Step` **只在模型调用时递增**。反复发出不调用模型的动作（`ActionCallTools`/`ActionSpawn`）的策略会无限空转，**持锁挂死**。`MaxSteps` 在构造上拦不住它——它数的正是永远不动的那个量。已加迭代兜底。
+2. **nudge 后仍执行批次**：内核记录 nudge 然后照跑被标记的批次。原断言（执行数 < 提议数）**放过了它**，因为最终的 force stop 仍会提前结束运行；现改为逐事件走 `LOOP_NUDGE` 到其 `STEP_COMPLETED` 之间。
+3. **取消被报成失败**：模型调用中取消会以 `FAILED`/`MODEL` 结束——**有意的停止会被计成缺陷**并触发失败告警。
+4. **类型化 nil 陷阱**：把具体指针字段放宽为接口会存入**带类型的 nil**，它 `!= nil`，导致后续所有 nil 检查失效、首次方法调用解引用空接收者。"接口放宽零成本"这一说法**在 nil 边界上不成立**。
+5. **取消无原因**：调用者停止与看门狗干预在 journal 中不可区分。
+
+### 剩余
+
+| 项 | 说明 |
+|---|---|
+| `ActionFanout` / `ActionRunDAG` | 需逐分支控制流；`FanoutSpec` 语义尚未定稿 |
+| `permissions` / `hooks` / `prompt-engine` 适配器 | 含第三方依赖，适配器**必须**位于核心之外（`integrations/*`），核心只保留接口 |
+| `vector` 适配器 | `MemoryManager` 无枚举接口，无法建立索引写入路径——需先补枚举能力 |
+| S5 其余模式 | CoT / ToT / Debate / Swarm / Handoff / Research（Reflection 已验证装饰器模式可行） |
+| 取消的 error 语义 | `Run` 在取消时同时返回 context 错误与 `CANCELLED` 结果。这是 Go 常见惯例且结果已带终态，**经评估后保留**，非缺陷 |
+
+---
+
 ## 8. 已有但被低估的地基（不要重建）
 
 这份审计最有价值的结论之一：**最难的部分已经做完了。**
