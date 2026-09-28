@@ -92,7 +92,7 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 		select {
 		case <-ctx.Done():
 			state.Status = TaskCancelled
-			state.LastError = map[string]any{"code": "CANCELLED", "message": ctx.Err().Error()}
+			state.LastError = map[string]any{"code": "CANCELLED", "message": cancellationMessage(ctx)}
 			_ = r.commitEvent(&state, "TURN_COMPLETED", r.turnCompletedPayload(ctx, map[string]any{"turn_id": state.CurrentTurnID, "status": TaskCancelled, "reason": "context_cancelled"}))
 			_ = r.commitEvent(&state, "TASK_CANCELLED", state.LastError)
 			return r.result(state, "")
@@ -797,11 +797,26 @@ func (k *loopKernel) commitCancellation(ctx context.Context, state *TaskState) *
 	}
 	r := k.runtime
 	state.Status = TaskCancelled
-	state.LastError = map[string]any{"code": "CANCELLED", "message": ctx.Err().Error()}
+	state.LastError = map[string]any{"code": "CANCELLED", "message": cancellationMessage(ctx)}
 	_ = r.commitEvent(state, "TURN_COMPLETED", r.turnCompletedPayload(ctx, map[string]any{
 		"turn_id": state.CurrentTurnID, "status": TaskCancelled, "reason": "context_cancelled",
 	}))
 	_ = r.commitEvent(state, "TASK_CANCELLED", state.LastError)
 	result := r.result(*state, "")
 	return &result
+}
+
+// cancellationMessage reports why a context ended.
+//
+// It prefers the cause, so the journal says whether a caller stopped the task or
+// a watchdog broke a stall, rather than the generic "context canceled" that both
+// would otherwise produce.
+func cancellationMessage(ctx context.Context) string {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause.Error()
+	}
+	if err := ctx.Err(); err != nil {
+		return err.Error()
+	}
+	return "cancelled"
 }

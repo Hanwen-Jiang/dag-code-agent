@@ -48,6 +48,8 @@ type runtimeConfig struct {
 	subagentPolicy SubagentPolicy
 	// toolCatalogThreshold defers tool schemas above this catalogue size.
 	toolCatalogThreshold int
+	// watchdog bounds live runs.
+	watchdog WatchdogPolicy
 }
 
 // WithStreamBuffer sets how many observation frames a streamed run may queue
@@ -433,5 +435,6 @@ func New(opts ...Option) (*Runtime, error) {
 		loopGuard:      cfg.loopGuard,
 		streamBuffer:   cfg.streamBuffer,
 		subagentPolicy: cfg.subagentPolicy,
+		watchdog:       cfg.watchdog,
 	}, nil
 }

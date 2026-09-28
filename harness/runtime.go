@@ -68,12 +68,14 @@ type Runtime struct {
 	streamBuffer int
 	// subagentPolicy bounds fan-out.
 	subagentPolicy SubagentPolicy
+	// watchdog bounds how long a live run may take or stay silent.
+	watchdog WatchdogPolicy
 	// running maps a live task to the function that cancels its context. It is
 	// guarded by its own lock rather than r.mu, because r.mu is held for the
 	// whole duration of a run: a caller asking to cancel would have to wait for
 	// the very thing it is trying to stop.
 	runningMu sync.Mutex
-	running   map[string]context.CancelFunc
+	running   map[string]context.CancelCauseFunc
 	// newID generates identifiers created during a run; injectable so a
 	// deterministic test can assert a byte-identical journal.
 	newID func(string) string
@@ -592,7 +594,7 @@ func (r *Runtime) cancel(taskID string, auth AuthContext) RunResult {
 	// records its own termination; the lock is taken below only to cover a task
 	// that is not running at all.
 	if cancel := r.runCancelFunc(taskID); cancel != nil {
-		cancel()
+		cancel(ErrCancelledByCaller)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -631,11 +633,11 @@ func taskDepth(state TaskState) int {
 }
 
 // registerRun records how to cancel a live task.
-func (r *Runtime) registerRun(taskID string, cancel context.CancelFunc) {
+func (r *Runtime) registerRun(taskID string, cancel context.CancelCauseFunc) {
 	r.runningMu.Lock()
 	defer r.runningMu.Unlock()
 	if r.running == nil {
-		r.running = map[string]context.CancelFunc{}
+		r.running = map[string]context.CancelCauseFunc{}
 	}
 	r.running[taskID] = cancel
 }
@@ -647,7 +649,7 @@ func (r *Runtime) unregisterRun(taskID string) {
 }
 
 // runCancelFunc returns the cancel function for a live task, if any.
-func (r *Runtime) runCancelFunc(taskID string) context.CancelFunc {
+func (r *Runtime) runCancelFunc(taskID string) context.CancelCauseFunc {
 	r.runningMu.Lock()
 	defer r.runningMu.Unlock()
 	return r.running[taskID]
@@ -659,10 +661,20 @@ func (r *Runtime) runCancelFunc(taskID string) context.CancelFunc {
 // this, so Cancel works against a running task rather than only against one that
 // has already stopped.
 func (r *Runtime) beginRun(ctx context.Context, taskID string) (context.Context, func()) {
-	runCtx, cancel := context.WithCancel(ctx)
+	// A cause rather than a bare cancel: "who stopped this and why" belongs in
+	// the journal, and a caller-initiated stop is not the same event as a
+	// watchdog breaking a stall.
+	runCtx, cancel := context.WithCancelCause(ctx)
 	r.registerRun(taskID, cancel)
+	// Supervision starts with the run, so no caller has to remember to arm it.
+	r.startWatchdog(runCtx, cancel, taskID)
 	return runCtx, func() {
 		r.unregisterRun(taskID)
-		cancel()
+		cancel(nil)
 	}
 }
+
+// ErrCancelledByCaller records an explicit cancellation request. The cause is
+// journaled, so an operator can tell a deliberate stop apart from a watchdog
+// breaking a stall without reading logs.
+var ErrCancelledByCaller = errors.New("cancelled by caller")
