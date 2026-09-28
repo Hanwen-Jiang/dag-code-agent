@@ -57,6 +57,8 @@ type runtimeConfig struct {
 	toolAuthorizer ToolAuthorizer
 	// hookBus receives lifecycle events.
 	hookBus HookBus
+	// systemPrompt supplies the first stable message.
+	systemPrompt SystemPromptProvider
 }
 
 // WithStreamBuffer sets how many observation frames a streamed run may queue
@@ -361,6 +363,9 @@ func New(opts ...Option) (*Runtime, error) {
 	// spill level needs.
 	if cfg.memoryRanker != nil && cfg.memory != nil {
 		cfg.memory.SetRanker(cfg.memoryRanker)
+	}
+	if cfg.systemPrompt != nil && cfg.contextBuilder.SystemPrompt == nil {
+		cfg.contextBuilder.SystemPrompt = cfg.systemPrompt
 	}
 	if cfg.skillResolver != nil {
 		cfg.contextBuilder.Skills = cfg.skillResolver

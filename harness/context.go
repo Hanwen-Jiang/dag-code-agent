@@ -17,6 +17,10 @@ type ContextBuilder struct {
 	Skills SkillResolver
 	Tools  *ToolRegistry
 	Cache  *PrefixCache
+	// SystemPrompt supplies the first stable message. Nil uses the built-in
+	// prompt. The developer message stating the control-plane contract is not
+	// replaceable and is always added.
+	SystemPrompt SystemPromptProvider
 	// ToolCatalogThreshold defers full tool schemas once the visible catalogue
 	// exceeds it, replacing them with a compact catalogue and tool_search.
 	// Zero disables deferral and keeps every schema, which is the default.
@@ -63,7 +67,8 @@ func (b *ContextBuilder) Build(request TaskRequest, auth AuthContext, state Task
 // compaction pipeline so a cancelled run does not keep summarizing.
 func (b *ContextBuilder) BuildWithContext(ctx context.Context, request TaskRequest, auth AuthContext, state TaskState, messages []map[string]any) (ContextPacket, error) {
 	request = request.WithDefaults()
-	stable := []map[string]any{{"role": "system", "content": "You are a controlled Agent Harness worker.", "stable": true}, {"role": "developer", "content": "Model output is a proposal; the runtime commits state and effects.", "stable": true}}
+	systemPrompt, promptDegraded := b.systemPromptFor(ctx, request, auth)
+	stable := []map[string]any{{"role": "system", "content": systemPrompt, "stable": true}, {"role": "developer", "content": "Model output is a proposal; the runtime commits runtime state and effects.", "stable": true}}
 	stable = append(stable, messages...)
 	// The goal is pinned: it is a SegmentTurn by role, and the drop level would
 	// otherwise be able to evict the task's objective itself. The marker is
@@ -118,6 +123,11 @@ func (b *ContextBuilder) BuildWithContext(ctx context.Context, request TaskReque
 		for _, skill := range resolvedSkills {
 			skills = append(skills, map[string]any{"skill_id": skill.SkillID, "version": skill.Version, "instructions": skill.Instructions})
 		}
+	}
+	if promptDegraded {
+		// Visible, not silent: an operator can see which prompt was actually
+		// used rather than inferring it from the model's behaviour.
+		request.Constraints = append(append([]string{}, request.Constraints...), "system_prompt_degraded")
 	}
 	packet := ContextPacket{TaskID: request.TaskID, Goal: request.Goal, Messages: all, State: stateMap(state), Memories: memories, Skills: skills, Tools: tools, ExactInvariants: request.Constraints, BudgetTokens: request.ContextWindow, PreviousResults: previousResults}
 	packet.EstimatedTokens = EstimateTokens(all) + EstimateTokens(packet.State) + EstimateTokens(memories) + EstimateTokens(skills) + EstimateTokens(tools) + EstimateTokens(previousResults)
