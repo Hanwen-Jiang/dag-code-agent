@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // The strategy seam is the foundation every loop topology will be built on, so
@@ -200,3 +201,61 @@ func (versionlessStrategy) Name() string                                    { re
 func (versionlessStrategy) Version() string                                 { return "" }
 func (versionlessStrategy) Next(context.Context, LoopState) (Action, error) { return Action{}, nil }
 func (versionlessStrategy) OnResult(st LoopState, _ StepResult) LoopState   { return st }
+
+// ActionFanout and ActionRunDAG are refused, and the refusal must say what is
+// missing rather than looking like a bug in the strategy.
+//
+// They are not implemented for concrete reasons, recorded on the types rather
+// than left to be rediscovered:
+//
+//   - FanoutSpec carries Scorer, Prune and Rounds, which need a scorer registry
+//     the runtime does not have. Implementing Branches alone would leave three
+//     declared fields silently inert.
+//   - A run-DAG action would need the dag package's types, and harness/dag
+//     imports harness, so the core cannot reference them without an import
+//     cycle. A strategy that wants a DAG expresses it as a sequence of spawns.
+func TestUnimplementedActionsFailWithAClearReason(t *testing.T) {
+	store := NewInMemoryStore()
+	defer store.Close()
+	runtime, err := New(WithStore(store),
+		WithModel(NewScriptedModel([]ModelResponse{{Text: "unused", FinishReason: "stop"}})),
+		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))),
+		WithIDSource(sequentialIDs()),
+		WithStrategyInstance(&fanoutStrategy{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
+
+	result, err := runtime.Run(context.Background(), TaskRequest{
+		TaskID: "fanout", Goal: "try several approaches", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 4,
+	}, auth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != TaskFailed || result.FailureCategory != "STRATEGY" {
+		t.Fatalf("status=%s category=%s, want FAILED/STRATEGY", result.Status, result.FailureCategory)
+	}
+	message := stringValue(result.State.LastError["message"])
+	if !contains(message, "fanout") {
+		t.Fatalf("the refusal does not name the action: %q", message)
+	}
+	// It must be the contract error, not a crash or a silent no-op, so a
+	// strategy author can tell "not supported" from "my bug".
+	if !contains(message, "unsupported") {
+		t.Fatalf("the refusal does not read as an unsupported action: %q", message)
+	}
+}
+
+// fanoutStrategy emits the one action the kernel refuses.
+type fanoutStrategy struct{}
+
+func (fanoutStrategy) Name() string    { return "fanout-test" }
+func (fanoutStrategy) Version() string { return "1.0.0" }
+
+func (fanoutStrategy) Next(context.Context, LoopState) (Action, error) {
+	return Action{Kind: ActionFanout, Fanout: &FanoutSpec{Branches: 3, Prune: 1}}, nil
+}
+
+func (fanoutStrategy) OnResult(st LoopState, _ StepResult) LoopState { return st }

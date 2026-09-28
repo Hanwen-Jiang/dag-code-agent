@@ -109,6 +109,21 @@ const (
 // FanoutSpec describes one branch set for tree search or debate topologies.
 // It is declared here so strategies can express them, and executed by the
 // kernel like any other action.
+// FanoutSpec describes kernel-level best-of-N sampling.
+//
+// NOT YET HONORED. The kernel refuses ActionFanout with ErrStrategyContract, and
+// this comment says why rather than leaving the fields looking implemented.
+//
+// Branches alone would be expressible today as ActionSpawn: run these subagents
+// and take all their results. What makes a fan-out distinct is the rest of the
+// struct — sampling at varied temperature, SCORING the branches, PRUNING to the
+// best few, and repeating over rounds with different personas. Those need a
+// scorer registry the runtime does not have.
+//
+// Shipping the branches and ignoring Scorer, Prune and Rounds would be worse than
+// not shipping it: three declared fields would silently do nothing, which is the
+// same trap already fixed twice here (Action.Model, and the typed-nil interface
+// widening). A strategy author would set Prune and reasonably expect pruning.
 type FanoutSpec struct {
 	Branches    int
 	Temperature float64

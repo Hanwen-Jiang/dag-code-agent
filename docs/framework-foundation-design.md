@@ -847,6 +847,41 @@ nil 语义发生了变化——把 nil 的 `*SkillRegistry` 赋给接口会存�
 
 ---
 
+## 7.10 交付状态（第十二至二十四轮）：外围包全部接入，动作面 9/10 定案
+
+### 外围包接入完成（七个悬空包全部可达）
+
+| 包 | 接入方式 | 说明 |
+|---|---|---|
+| `loopsdetect` | 直接引入（零依赖） | `LoopGuard` 接缝 + nudge 语义 |
+| `skills` | 直接引入（零依赖） | `SkillResolver` 接缝 |
+| `multiagent` | 直接引入（零依赖） | 子代理**选择**（适配度评分 + `MinAgentFit`） |
+| `permissions` | 接缝 + `integrations/permissions` | `ToolAuthorizer`，**只能收窄不能放宽** |
+| `hooks` | 接缝 + `integrations/hooks` | `HookBus` 生命周期事件 |
+| `prompt-engine` | 接缝 + `integrations/promptengine` | `SystemPromptProvider`，**不替换控制面契约** |
+| `vector` | 能力由记忆排序接缝覆盖 | `MemoryRanker` + `EmbeddingRanker` |
+
+**核心依赖预算始终保持 2**（G7 护栏核实），因为含第三方依赖的适配器全部位于核心之外。
+
+### 适配器模式（后续接入照此办理）
+
+1. **接口在核心**，只包含核心真正会调用的方法。
+2. **接口里不放被忽略的参数** —— 被接受然后忽略的参数**读起来像承诺**（`Action.Model` 已犯过此错）。
+3. **适配器在 `integrations/*`**，可编译期断言 `var _ harness.X = (*Adapter)(nil)`。
+4. **增强而非依赖**：适配器失败**降级**而不弄挂任务（排序器、提示提供者均如此），但失败**必须可见**（`system_prompt_degraded`、日志）。
+5. **单向组合**：授权器只能收窄策略，永不放宽。
+
+### 动作面定案：9/10
+
+`ActionFanout` 与 `ActionRunDAG` **明确不实现**，理由记录在类型上而非留给后人重新发现：
+
+- **`FanoutSpec` 不是一个 Branches 字段。** 它带 `Scorer` / `Prune` / `Rounds` / `Personas`，这些需要一个运行时**没有**的评分器注册表。只实现 `Branches` 会让三个已声明字段**静默失效** —— 与本项目已修过两次的陷阱同类（`Action.Model`、类型化 nil）。一个策略作者设了 `Prune` 就会合理地期待剪枝发生。
+- **`ActionRunDAG` 结构上不可能走 dag 包**：`harness/dag` **反向 import 了 `harness`**（`executor.go`），核心引用它会形成 import cycle。想用 DAG 的策略把它表达为一串 spawn 即可 —— 这是便利性缺口，不是能力缺口。
+
+两者仍以 `ErrStrategyContract` **明确拒绝**，并有测试断言拒绝信息**点出动作名且读起来是「不支持」**，而非崩溃或静默空操作 —— 策略作者必须能分辨「不支持」与「我写错了」。
+
+---
+
 ## 8. 已有但被低估的地基（不要重建）
 
 这份审计最有价值的结论之一：**最难的部分已经做完了。**
