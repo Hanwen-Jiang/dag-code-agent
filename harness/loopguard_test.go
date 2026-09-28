@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // The loop guard seam replaced a bare fingerprint counter that could only ever
@@ -285,3 +286,8 @@ func (g *alwaysStopGuard) Check(LoopObservation) LoopVerdict {
 	return LoopVerdict{Decision: LoopContinue}
 }
 func (g *alwaysStopGuard) Reset(string) {}
+
+// fixedClockTimeForTests is the timestamp shared by runtime tests.
+func fixedClockTimeForTests() time.Time {
+	return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+}
