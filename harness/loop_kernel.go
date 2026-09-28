@@ -66,6 +66,14 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 	taskID := state.TaskID
 	k.ctx = ctx
 
+	// Every iteration must consume something. The loop below is bounded by
+	// state.Step, and Step only advances on a MODEL CALL — so a strategy
+	// emitting actions that never call the model (ActionCallTools, ActionSpawn)
+	// would spin forever with no budget consumed and nothing to stop it,
+	// hanging the run while it holds the runtime lock. That is reachable from
+	// any custom strategy, so it needs a backstop rather than a convention.
+	maxIterations := request.MaxSteps + request.MaxToolCalls + maxLoopSlack
+	iteration := 0
 	// Loop detection is owned by the guard, which keeps its own per-task
 	// history. Clearing it when the run ends bounds that state and gives a
 	// resumed turn a fresh window.
@@ -76,6 +84,10 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 	view := k.loopState(state)
 
 	for state.Step < request.MaxSteps {
+		if iteration >= maxIterations {
+			return r.failAndCommit(state, "LIMIT", fmt.Errorf("MAX_ITERATIONS_EXCEEDED (%d): the strategy is repeating an action that consumes no budget", maxIterations))
+		}
+		iteration++
 		// Cancellation is checked before anything durable happens.
 		select {
 		case <-ctx.Done():
@@ -108,6 +120,29 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 			// A step that runs tools without asking the model. Strategies that
 			// want this (plan-execute, retry-a-tool) emit it explicitly.
 			result, nextState, terminal := k.stepTools(ctx, state, action.Tools)
+			state = nextState
+			if terminal != nil {
+				return *terminal
+			}
+			view = k.strategy.OnResult(k.refresh(view, state), result)
+
+		case ActionSpawn:
+			// The strategy decides to delegate. The model-proposed path exists
+			// too, and both converge on the same fan-out so the journal does not
+			// depend on which one asked.
+			result, nextState, terminal := k.executeFanout(ctx, state, state.Step, action.Subagents, "strategy")
+			state = nextState
+			if terminal != nil {
+				return *terminal
+			}
+			view = k.strategy.OnResult(k.refresh(view, state), result)
+
+		case ActionHandoff:
+			// A handoff is a fan-out of exactly one. The decided semantics are
+			// that a subagent RETURNS its result, so a handoff cannot transfer
+			// task ownership: the parent keeps the journal and produces the
+			// final answer from what came back.
+			result, nextState, terminal := k.executeFanout(ctx, state, state.Step, []SubagentSpec{*action.Handoff}, "handoff")
 			state = nextState
 			if terminal != nil {
 				return *terminal
@@ -554,10 +589,6 @@ func (k *loopKernel) applyLoopGuard(state TaskState, calls []ToolCall) (TaskStat
 // arrive as an observation it can read on the next model call.
 func (k *loopKernel) stepSubagents(ctx context.Context, state TaskState, stepNumber int, model ModelResponse, response ModelResponse) (StepResult, TaskState, *RunResult) {
 	r := k.runtime
-	policy := r.subagentPolicy
-	if policy.MaxParallel <= 0 {
-		policy = DefaultSubagentPolicy()
-	}
 
 	if err := r.commitEvent(&state, "SUBAGENTS_REQUESTED", map[string]any{
 		"turn_id": state.CurrentTurnID, "step": stepNumber,
@@ -573,6 +604,29 @@ func (k *loopKernel) stepSubagents(ctx context.Context, state TaskState, stepNum
 		// clearer than silently continuing with no work done.
 		result := r.failAndCommit(state, "MODEL_OUTPUT", errors.New("SUBAGENT_PROPOSALS_INVALID"))
 		return StepResult{}, state, &result
+	}
+	result, next, terminal := k.executeFanout(ctx, state, stepNumber, specs, "model")
+	if terminal != nil {
+		return result, next, terminal
+	}
+	// The strategy still needs to see what the model proposed, which the shared
+	// fan-out path has no reason to know about.
+	result.Model = &model
+	result.ModelText = response.Text
+	return result, next, nil
+}
+
+// executeFanout runs a fan-out and folds the results into the parent.
+//
+// Shared by the two ways a fan-out can start, because they differ only in who
+// decided: the model proposing subagents, or the strategy emitting ActionSpawn
+// itself. The journal must not depend on which, so the events, ordering and
+// merge are identical and only the origin field differs.
+func (k *loopKernel) executeFanout(ctx context.Context, state TaskState, stepNumber int, specs []SubagentSpec, origin string) (StepResult, TaskState, *RunResult) {
+	r := k.runtime
+	policy := r.subagentPolicy
+	if policy.MaxParallel <= 0 {
+		policy = DefaultSubagentPolicy()
 	}
 
 	if k.depth >= policy.MaxDepth {
@@ -594,13 +648,14 @@ func (k *loopKernel) stepSubagents(ctx context.Context, state TaskState, stepNum
 			result := r.failAndCommit(state, "STORE", err)
 			return StepResult{}, state, &result
 		}
-		return StepResult{Action: ActionCallModel, Model: &model, ModelText: response.Text}, state, nil
+		return StepResult{Action: ActionCallModel}, state, nil
 	}
 
 	for _, spec := range specs {
 		if err := r.commitEvent(&state, "SUBAGENT_SPAWNED", map[string]any{
 			"turn_id": state.CurrentTurnID, "step": stepNumber,
 			"agent_id": spec.AgentID, "role": spec.Role, "objective": spec.Objective, "max_steps": spec.MaxSteps,
+			"origin": origin,
 		}); err != nil {
 			result := r.failAndCommit(state, "STORE", err)
 			return StepResult{}, state, &result
@@ -624,7 +679,7 @@ func (k *loopKernel) stepSubagents(ctx context.Context, state TaskState, stepNum
 	}
 	state = guarded
 	if nudged {
-		return StepResult{Action: ActionCallModel, Model: &model, ModelText: response.Text}, state, nil
+		return StepResult{Action: ActionCallModel}, state, nil
 	}
 
 	runner := r.newSubagentRunner(state, k.auth, k.budget())
@@ -658,5 +713,5 @@ func (k *loopKernel) stepSubagents(ctx context.Context, state TaskState, stepNum
 		result := r.failAndCommit(state, "STORE", err)
 		return StepResult{}, state, &result
 	}
-	return StepResult{Action: ActionCallModel, Model: &model, ModelText: response.Text, SubagentResults: results}, state, nil
+	return StepResult{Action: ActionCallModel, SubagentResults: results}, state, nil
 }

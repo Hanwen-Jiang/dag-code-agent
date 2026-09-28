@@ -126,6 +126,13 @@ func newDetectorLoopGuard() *detectorLoopGuard {
 	return &detectorLoopGuard{managers: map[string]*loopManager{}, history: loopHistoryLimit}
 }
 
+// maxLoopSlack is the extra iterations allowed beyond the configured budgets.
+//
+// A legitimate iteration may consume nothing directly: a loop-guard nudge skips
+// its batch after Step has already advanced. The slack absorbs those while still
+// catching a strategy that consumes nothing at all.
+const maxLoopSlack = 64
+
 // loopHistoryLimit bounds the rolling window handed to the detectors.
 const loopHistoryLimit = 64
 

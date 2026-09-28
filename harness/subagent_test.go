@@ -304,3 +304,242 @@ func TestSubagentMergeReportsFailureWithoutFailingParent(t *testing.T) {
 		t.Fatalf("parent ended in %s", result.Status)
 	}
 }
+
+// A strategy may decide to delegate itself. Before this the kernel validated
+// ActionSpawn and then failed the run, so the action was declarable but not
+// executable — a trap for the custom-strategy platform.
+type spawnStrategy struct {
+	inner Strategy
+	spawn bool
+}
+
+func (s *spawnStrategy) Name() string    { return "spawn-test" }
+func (s *spawnStrategy) Version() string { return "1.0.0" }
+
+func (s *spawnStrategy) Next(ctx context.Context, st LoopState) (Action, error) {
+	if !s.spawn && st.Step == 0 {
+		s.spawn = true
+		return Action{Kind: ActionSpawn, Subagents: []SubagentSpec{
+			{AgentID: "alpha", Role: "researcher", Objective: "ANSWER-FOR alpha"},
+		}}, nil
+	}
+	return ReActStrategy{}.Next(ctx, st)
+}
+
+func (s *spawnStrategy) OnResult(st LoopState, result StepResult) LoopState {
+	return ReActStrategy{}.OnResult(st, result)
+}
+
+func TestStrategyInitiatedSpawnExecutes(t *testing.T) {
+	store := NewInMemoryStore()
+	defer store.Close()
+	runtime, err := New(
+		WithStore(store),
+		WithModel(newDelegatingModel()),
+		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))),
+		WithIDSource(sequentialIDs()),
+		WithStrategyInstance(&spawnStrategy{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
+
+	result, err := runtime.Run(context.Background(), TaskRequest{
+		TaskID: "spawned", Goal: "some task", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 6,
+	}, auth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != TaskCompleted {
+		t.Fatalf("status=%s category=%s error=%v", result.Status, result.FailureCategory, result.State.LastError)
+	}
+	child, _, err := store.GetTask("spawned:alpha")
+	if err != nil {
+		t.Fatalf("the strategy-initiated spawn created no child task: %v", err)
+	}
+	if child.Status != TaskCompleted || child.FinalAnswer != "answer from alpha" {
+		t.Fatalf("child status=%s answer=%q", child.Status, child.FinalAnswer)
+	}
+	// The spawn event records who decided, so a replay can tell the two origins
+	// apart.
+	events, err := runtime.Journal().Replay("spawned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := ""
+	for _, event := range events {
+		if event.Type == "SUBAGENT_SPAWNED" {
+			origin = stringValue(event.Payload["origin"])
+		}
+	}
+	if origin != "strategy" {
+		t.Fatalf("SUBAGENT_SPAWNED origin=%q, want strategy", origin)
+	}
+}
+
+// A handoff runs exactly one child and returns its result to the parent, which
+// keeps ownership of the final answer.
+type handoffStrategy struct {
+	inner Strategy
+	sent  bool
+}
+
+func (s *handoffStrategy) Name() string    { return "handoff-test" }
+func (s *handoffStrategy) Version() string { return "1.0.0" }
+
+func (s *handoffStrategy) Next(ctx context.Context, st LoopState) (Action, error) {
+	if !s.sent && st.Step == 0 {
+		s.sent = true
+		return Action{Kind: ActionHandoff, Handoff: &SubagentSpec{AgentID: "beta", Role: "reviewer", Objective: "ANSWER-FOR beta"}}, nil
+	}
+	return ReActStrategy{}.Next(ctx, st)
+}
+
+func (s *handoffStrategy) OnResult(st LoopState, result StepResult) LoopState {
+	return ReActStrategy{}.OnResult(st, result)
+}
+
+func TestHandoffReturnsResultToParent(t *testing.T) {
+	store := NewInMemoryStore()
+	defer store.Close()
+	runtime, err := New(
+		WithStore(store),
+		WithModel(newDelegatingModel()),
+		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))),
+		WithIDSource(sequentialIDs()),
+		WithStrategyInstance(&handoffStrategy{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
+
+	result, err := runtime.Run(context.Background(), TaskRequest{
+		TaskID: "handed", Goal: "some task", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 6,
+	}, auth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != TaskCompleted {
+		t.Fatalf("status=%s category=%s error=%v", result.Status, result.FailureCategory, result.State.LastError)
+	}
+	// The parent owns the outcome: the handoff did not transfer the task.
+	result2 := result
+	if result2.TaskID != "handed" {
+		t.Fatalf("the result belongs to %q, so ownership and handoff semantics disagree", result2.TaskID)
+	}
+	child, _, err := store.GetTask("handed:beta")
+	if err != nil {
+		t.Fatalf("no handoff child task: %v", err)
+	}
+	if child.FinalAnswer != "answer from beta" {
+		t.Fatalf("child answer=%q", child.FinalAnswer)
+	}
+	// Exactly one child: a handoff is not a fan-out.
+	entries, err := store.ListTasks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	children := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.TaskID, "handed:") {
+			children++
+		}
+	}
+	if children != 1 {
+		t.Fatalf("a handoff spawned %d children, want 1", children)
+	}
+}
+
+// A strategy that always emits an action which never calls the model used to
+// hang the runtime forever: the loop is bounded by state.Step, Step only
+// advances on a model call, and no budget was consumed. Reproduced here as a
+// ten-minute test timeout before the iteration backstop existed.
+type spinningStrategy struct{}
+
+func (spinningStrategy) Name() string    { return "spinning" }
+func (spinningStrategy) Version() string { return "1.0.0" }
+
+func (spinningStrategy) Next(context.Context, LoopState) (Action, error) {
+	// Consumes no model call, no tool budget and no subagent slot.
+	return Action{Kind: ActionCallTools, Tools: []ToolCall{}}, nil
+}
+
+func (spinningStrategy) OnResult(st LoopState, _ StepResult) LoopState { return st }
+
+func TestStrategyThatConsumesNoBudgetTerminates(t *testing.T) {
+	store := NewInMemoryStore()
+	defer store.Close()
+	runtime, err := New(
+		WithStore(store),
+		WithModel(newDelegatingModel()),
+		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))),
+		WithIDSource(sequentialIDs()),
+		WithStrategyInstance(spinningStrategy{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
+
+	// The empty tool list fails validation first, which is itself a contract
+	// check; the point is that the run ends rather than hanging.
+	done := make(chan RunResult, 1)
+	go func() {
+		result, _ := runtime.Run(context.Background(), TaskRequest{
+			TaskID: "spinning", Goal: "spin", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 3,
+		}, auth)
+		done <- result
+	}()
+	select {
+	case result := <-done:
+		if result.Status != TaskFailed {
+			t.Fatalf("a strategy consuming no budget ended in %s, want FAILED", result.Status)
+		}
+		if result.FailureCategory != "STRATEGY" && result.FailureCategory != "LIMIT" {
+			t.Fatalf("failure category=%s, want STRATEGY or LIMIT", result.FailureCategory)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the run did not terminate: a strategy consuming no budget hangs the runtime")
+	}
+}
+
+// The backstop must not fire on legitimate work: a strategy that does consume
+// budget runs to completion.
+func TestIterationBackstopAllowsLegitimateWork(t *testing.T) {
+	store := NewInMemoryStore()
+	defer store.Close()
+	registry := NewToolRegistry()
+	if err := registry.Register(ToolSpec{
+		Name: "echo", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"v": map[string]any{"type": "string"}}},
+		ConcurrencySafe: true, SideEffect: "NONE",
+		Handler: func(args map[string]any, _ AuthContext) (any, error) { return args, nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := []ToolCall{{CallID: "c1", Name: "echo", Arguments: map[string]any{"v": "a"}}, {CallID: "c2", Name: "echo", Arguments: map[string]any{"v": "b"}}}
+	model := NewScriptedModel([]ModelResponse{
+		{ToolCalls: calls}, {ToolCalls: calls}, {Text: "final", FinishReason: "stop"},
+	})
+	runtime, err := New(WithStore(store), WithModel(model), WithToolRegistry(registry),
+		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))), WithIDSource(sequentialIDs()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
+
+	result, err := runtime.Run(context.Background(), TaskRequest{
+		TaskID: "legit", Goal: "use tools", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 6, MaxToolCalls: 8,
+	}, auth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != TaskCompleted {
+		t.Fatalf("legitimate work failed with %s/%s: the backstop is too tight", result.Status, result.FailureCategory)
+	}
+}
