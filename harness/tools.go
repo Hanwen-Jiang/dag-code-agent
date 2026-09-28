@@ -82,6 +82,9 @@ type ToolRuntime struct {
 	Registry *ToolRegistry
 	Store    IdempotencyStore
 	Policy   *ExecutionPolicy
+	// Authorizer may refuse a call the policy allowed. It cannot permit one the
+	// policy refuses.
+	Authorizer ToolAuthorizer
 	// MaxParallel bounds a concurrent tool batch. Zero selects the default.
 	MaxParallel int
 }
@@ -147,6 +150,17 @@ func (r *ToolRuntime) Execute(ctx context.Context, call ToolCall, auth AuthConte
 		result.ErrorCode = "TOOL_NOT_FOUND"
 		result.ErrorMessage = "tool is not registered"
 		return result
+	}
+	// The authorizer runs independently of the policy, not inside it: an
+	// embedder may install only an authorizer, and nesting it would have made
+	// that configuration silently do nothing.
+	//
+	// Both must pass when both are present. A refusal from either is final, so
+	// the richer engine can narrow what the allowlist permits but never widen it.
+	if r.Authorizer != nil {
+		if err := r.Authorizer.AuthorizeTool(call.Name, call.Arguments); err != nil {
+			return ToolResult{CallID: call.CallID, Name: call.Name, Status: ToolFailed, ErrorCode: "DENIED", ErrorMessage: err.Error(), Attempts: 1}
+		}
 	}
 	if r.Policy != nil {
 		if err := r.Policy.AuthorizeTool(call.Name); err != nil {

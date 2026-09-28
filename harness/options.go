@@ -53,6 +53,8 @@ type runtimeConfig struct {
 	watchdog WatchdogPolicy
 	// memoryRanker orders memory retrieval when set.
 	memoryRanker MemoryRanker
+	// toolAuthorizer may refuse a call the policy allowed.
+	toolAuthorizer ToolAuthorizer
 }
 
 // WithStreamBuffer sets how many observation frames a streamed run may queue
@@ -343,6 +345,11 @@ func New(opts ...Option) (*Runtime, error) {
 			idempotency = candidate
 		}
 		cfg.tools = NewToolRuntime(cfg.registry, idempotency)
+	}
+	// Applied to whichever runtime is in use, so an authorizer is not silently
+	// dropped when the caller supplied their own ToolRuntime.
+	if cfg.toolAuthorizer != nil && cfg.tools.Authorizer == nil {
+		cfg.tools.Authorizer = cfg.toolAuthorizer
 	}
 	if cfg.contextBuilder == nil {
 		cfg.contextBuilder = NewContextBuilder(cfg.memory, cfg.skills, cfg.registry, cfg.cache)
