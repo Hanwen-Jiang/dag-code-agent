@@ -3,7 +3,6 @@ package harness
 import (
 	"context"
 	"fmt"
-	"strings"
 )
 
 // DebateStrategy: argue the question from opposing positions, then judge.
@@ -61,43 +60,24 @@ func (s DebateStrategy) stances() []string {
 func (s DebateStrategy) Name() string    { return debateStrategyName }
 func (s DebateStrategy) Version() string { return debateStrategyVersion }
 
-// Next drives the three phases: argue, judge, then delegate.
-func (s DebateStrategy) Next(ctx context.Context, st LoopState) (Action, error) {
-	switch debatePhase(st) {
-	case 0:
-		// A refused fan-out must not be retried. Retrying is what a strategy
-		// does when it cannot tell refusal from "not yet", and it ends with the
-		// loop backstop killing the run rather than with an answer.
-		if st.FanoutRejected != nil {
-			return Action{Kind: ActionCallModel, Guidance: []string{s.judgeInstruction(st)}}, nil
-		}
-		return Action{Kind: ActionVote, Subagents: s.debateSpecs(st)}, nil
-	case 1:
-		return Action{Kind: ActionCallModel, Guidance: []string{s.judgeInstruction(st)}}, nil
-	default:
-		return s.inner().Next(ctx, st)
+// plan is the shared fan-out-then-judge skeleton, configured for argument.
+func (s DebateStrategy) plan() fanoutJudgePlan {
+	return fanoutJudgePlan{
+		PhaseKey:   debatePhaseKey,
+		Kind:       ActionVote,
+		Specs:      s.debateSpecs,
+		Judge:      s.judgeInstruction,
+		NoAttempts: judgeRefused,
 	}
 }
 
+// Next drives the three phases: argue, judge, then delegate.
+func (s DebateStrategy) Next(ctx context.Context, st LoopState) (Action, error) {
+	return s.plan().next(ctx, st, s.inner())
+}
+
 func (s DebateStrategy) OnResult(st LoopState, result StepResult) LoopState {
-	next := s.inner().OnResult(st, result)
-	if next.Scratch == nil {
-		next.Scratch = map[string]any{}
-	}
-	// The phase is read from what happened, not from the action that asked for
-	// it: a fan-out reports Action=CallModel like any other model step, so
-	// branching on the action here would leave the strategy stuck in phase one
-	// forever.
-	if debatePhase(st) == 0 && (len(result.SubagentResults) > 0 || st.FanoutRejected != nil) {
-		// Either the debate happened or it was refused; both mean the strategy
-		// moves on rather than asking again.
-		next.Scratch[debatePhaseKey] = 1
-		return next
-	}
-	if debatePhase(st) == 1 && result.Action == ActionCallModel && strings.TrimSpace(result.ModelText) != "" {
-		next.Scratch[debatePhaseKey] = 2
-	}
-	return next
+	return s.plan().onResult(st, result, s.inner())
 }
 
 // debateSpecs builds one debater per stance, bounded by the configured count.
@@ -124,22 +104,10 @@ func (s DebateStrategy) debateSpecs(st LoopState) []SubagentSpec {
 // debate is already in the context the model is about to receive, and copying it
 // into a directive would send it twice and spend the budget twice.
 func (s DebateStrategy) judgeInstruction(st LoopState) string {
-	if len(st.LastSubs) == 0 {
-		// The debate was refused, so there is nothing to weigh. Saying so keeps
-		// the judge from looking for arguments that were never produced.
-		return "You are the judge, but the debate could not be held. Answer the task directly, " +
-			"and note in one sentence what a second opinion would have added."
-	}
 	return fmt.Sprintf(
 		"You are the judge. %d positions on this task were argued and their results are in the observations above. "+
 			"Weigh them against the task, decide which is better supported, and produce the final answer. "+
 			"If the arguments do not settle it, say what would.", len(st.LastSubs))
-}
-
-// debatePhase reads the phase from strategy scratch, tolerating a JSON
-// round-trip that turned the int into a float.
-func debatePhase(st LoopState) int {
-	return scratchInt(st, debatePhaseKey)
 }
 
 // compile-time assertion
