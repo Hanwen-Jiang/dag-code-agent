@@ -1,5 +1,5 @@
 .PHONY: test race vet build build-bin demo dag rework server proto clean \
-        guards conformance \
+        guards conformance release-check \
         agent-core orchestrator llm-service self-evolution xai-dashboard infra-up infra-down
 
 GOFLAGS ?=
@@ -17,6 +17,11 @@ vet:
 # docs/embeddability-design.md section 9.
 guards:
 	./scripts/embed-guards.sh --self-test
+
+# Verify that the latest tag is installable by a consumer with no replace
+# directive. Tagging is local; being installable is not.
+release-check:
+	./scripts/release-check.sh
 
 # Run the store conformance suite against every available backend.
 conformance:

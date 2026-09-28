@@ -9,3 +9,5 @@ frontend/node_modules/
 *.test
 .DS_Store
 examples/embed_external/external-consumer
+.gocache/
+.gomodcache/
