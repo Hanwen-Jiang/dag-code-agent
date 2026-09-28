@@ -66,6 +66,8 @@ type Runtime struct {
 	loopGuard LoopGuard
 	// streamBuffer bounds a streamed run's observation queue.
 	streamBuffer int
+	// subagentPolicy bounds fan-out.
+	subagentPolicy SubagentPolicy
 	// newID generates identifiers created during a run; injectable so a
 	// deterministic test can assert a byte-identical journal.
 	newID func(string) string
@@ -330,6 +332,15 @@ func validateIdentity(request TaskRequest, auth AuthContext) error {
 }
 
 func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthContext) RunResult {
+	return r.continueRunWithLedger(ctx, taskID, auth, nil)
+}
+
+// continueRunWithLedger drives a task with its own budget ledger.
+//
+// It deliberately does not take r.mu: a subagent runs while its parent's run
+// holds that lock, so taking it here would deadlock a fan-out against its own
+// parent.
+func (r *Runtime) continueRunWithLedger(ctx context.Context, taskID string, auth AuthContext, ledger *BudgetLedger) RunResult {
 	state, _, err := r.store.GetTask(taskID)
 	if err != nil {
 		return failedResult(TaskRequest{TaskID: taskID}, err)
@@ -365,6 +376,8 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 		auth:     auth,
 		scratch:  loadStrategyScratch(state),
 		rng:      newStrategyRand(state.TaskID, r.strategy),
+		ledger:   ledger,
+		depth:    taskDepth(state),
 	}
 	return kernel.run(ctx, state)
 }
@@ -578,3 +591,16 @@ func (r *Runtime) Recover(taskID string) (TaskState, error) {
 	return r.journal.ReplayState(taskID)
 }
 func (r *Runtime) Replay(taskID string) ([]Event, error) { return r.journal.Replay(taskID) }
+
+// taskDepth reads how deep in a fan-out a task is. It is read from the journaled
+// state rather than from the caller, so the limit cannot be bypassed by a
+// request that claims to be shallower than it is.
+func taskDepth(state TaskState) int {
+	if depth, ok := state.Metadata[subagentDepthKey].(int); ok && depth > 0 {
+		return depth
+	}
+	if depth, ok := state.Metadata[subagentDepthKey].(float64); ok && depth > 0 {
+		return int(depth)
+	}
+	return 0
+}

@@ -244,6 +244,25 @@ func TestKernelNudgesBeforeFailingOnRepetition(t *testing.T) {
 	if invocations >= proposals {
 		t.Fatalf("every proposal executed (invocations=%d proposals=%d): the guard's nudge did not suppress the flagged batch", invocations, proposals)
 	}
+
+	// Precisely: a nudge must not be followed by the batch it flagged. The
+	// looser "fewer invocations than proposals" check above passed even while
+	// the kernel executed the flagged batch anyway, because the eventual force
+	// stop still ended the run early. Walking the journal between a LOOP_NUDGE
+	// and its STEP_COMPLETED is what actually pins the behaviour.
+	for index, event := range events {
+		if event.Type != "LOOP_NUDGE" {
+			continue
+		}
+		for _, following := range events[index+1:] {
+			if following.Type == "STEP_COMPLETED" {
+				break
+			}
+			if following.Type == "TOOL_INVOKED" {
+				t.Fatal("the batch the guard flagged as unproductive ran anyway")
+			}
+		}
+	}
 }
 
 // A guard installed by the embedder replaces the default.

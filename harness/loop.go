@@ -56,6 +56,12 @@ var knownEventTypes = []string{
 	"TOOL_BATCH_COMPLETED",
 	// Emitted when the loop guard warns instead of terminating.
 	"LOOP_NUDGE",
+	// Fan-out vocabulary.
+	"SUBAGENT_SPAWNED",
+	"SUBAGENT_COMPLETED",
+	"SUBAGENT_FAILED",
+	"SUBAGENT_REJECTED",
+	"SUBAGENTS_MERGED",
 	"TOOLS_EXECUTED",
 	"SUBAGENTS_REQUESTED",
 	"VERIFIER_REJECTED",

@@ -43,6 +43,19 @@ type loopKernel struct {
 	// it so the per-run observation channel can report how many frames it had
 	// to drop (see turnCompletedPayload in stream.go).
 	ctx context.Context
+	// ledger is this run's budget. A subagent gets its own bounded slice of the
+	// parent's, so one runaway child cannot spend the whole tree's budget.
+	ledger *BudgetLedger
+	// depth is how deep in a fan-out this run is.
+	depth int
+}
+
+// budget returns the ledger this run charges against.
+func (k *loopKernel) budget() *BudgetLedger {
+	if k.ledger != nil {
+		return k.ledger
+	}
+	return k.runtime.budget
 }
 
 // run is the kernel loop. It returns exactly what the pre-strategy loop
@@ -126,7 +139,7 @@ func (k *loopKernel) loopState(state TaskState) LoopState {
 		Step:     state.Step,
 		Turns:    state.Turns,
 		Plan:     append([]PlanStep{}, state.CurrentPlan...),
-		Budget:   budgetSnapshot(k.runtime.budget),
+		Budget:   budgetSnapshot(k.budget()),
 		Scratch:  k.scratch,
 		Clock:    k.runtime.clock,
 		RNG:      k.rng,
@@ -138,7 +151,7 @@ func (k *loopKernel) loopState(state TaskState) LoopState {
 func (k *loopKernel) refresh(view LoopState, state TaskState) LoopState {
 	view.Step = state.Step
 	view.Turns = state.Turns
-	view.Budget = budgetSnapshot(k.runtime.budget)
+	view.Budget = budgetSnapshot(k.budget())
 	view.Scratch = k.scratch
 	return view
 }
@@ -231,8 +244,8 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState) (StepResult
 		result := r.failAndCommit(state, "STORE", err)
 		return StepResult{}, state, &result
 	}
-	if r.budget != nil {
-		if err := r.budget.Charge(response.Usage, len(response.ToolCalls)); err != nil {
+	if ledger := k.budget(); ledger != nil {
+		if err := ledger.Charge(response.Usage, len(response.ToolCalls)); err != nil {
 			result := r.failAndCommit(state, "BUDGET", err)
 			return StepResult{}, state, &result
 		}
@@ -252,18 +265,7 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState) (StepResult
 		return result, nextState, terminal
 	}
 	if len(response.SubagentRequests) > 0 {
-		// Executing subagents is the next milestone; recording the request
-		// preserves today's behaviour and the existing event vocabulary.
-		state.Observations = append(state.Observations, map[string]any{"type": "subagents_requested", "count": len(response.SubagentRequests)})
-		if err := r.commitEvent(&state, "SUBAGENTS_REQUESTED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "requests": response.SubagentRequests}); err != nil {
-			result := r.failAndCommit(state, "STORE", err)
-			return StepResult{}, state, &result
-		}
-		if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "subagents"}); err != nil {
-			result := r.failAndCommit(state, "STORE", err)
-			return StepResult{}, state, &result
-		}
-		return StepResult{Action: ActionCallModel, Model: &model, ModelText: response.Text}, state, nil
+		return k.stepSubagents(ctx, state, stepNumber, model, response)
 	}
 
 	// No gate, no tools, no subagents: the response must be a final answer.
@@ -311,9 +313,14 @@ func (k *loopKernel) stepTools(ctx context.Context, state TaskState, calls []Too
 	}
 	// Loop detection runs before anything executes, so a batch the guard has
 	// already flagged does not spend budget confirming what it suspects.
-	guarded, terminal := k.applyLoopGuard(state, calls)
+	guarded, terminal, nudged := k.applyLoopGuard(state, calls)
 	if terminal != nil {
 		return StepResult{}, guarded, terminal
+	}
+	if nudged {
+		// The batch is skipped, not merely annotated. Running a call the guard
+		// just flagged spends budget to reinforce the loop the model is in.
+		return StepResult{Action: ActionCallModel}, guarded, nil
 	}
 	state = guarded
 
@@ -497,10 +504,10 @@ func (k *loopKernel) stepToolsConcurrent(ctx context.Context, state TaskState, c
 //
 // The returned RunResult is non-nil only for a terminal verdict. A nudge returns
 // the state with the directive recorded and no terminal result.
-func (k *loopKernel) applyLoopGuard(state TaskState, calls []ToolCall) (TaskState, *RunResult) {
+func (k *loopKernel) applyLoopGuard(state TaskState, calls []ToolCall) (TaskState, *RunResult, bool) {
 	r := k.runtime
 	if r.loopGuard == nil || len(calls) == 0 {
-		return state, nil
+		return state, nil, false
 	}
 	verdict := r.loopGuard.Check(LoopObservation{
 		TaskID:    state.TaskID,
@@ -514,7 +521,7 @@ func (k *loopKernel) applyLoopGuard(state TaskState, calls []ToolCall) (TaskStat
 			err = fmt.Errorf("LOOP_DETECTED: %s", verdict.Message)
 		}
 		result := r.failAndCommit(state, "LOOP", err)
-		return state, &result
+		return state, &result, false
 	case LoopNudge:
 		directive := verdict.Directive()
 		state.Observations = append(state.Observations, map[string]any{
@@ -525,16 +532,131 @@ func (k *loopKernel) applyLoopGuard(state TaskState, calls []ToolCall) (TaskStat
 			"message": verdict.Message, "evidence": verdict.Evidence, "directive": directive,
 		}); err != nil {
 			result := r.failAndCommit(state, "STORE", err)
-			return state, &result
+			return state, &result, false
 		}
 		if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{
 			"turn_id": state.CurrentTurnID, "step": state.Step, "outcome": "loop_nudge",
 		}); err != nil {
 			result := r.failAndCommit(state, "STORE", err)
-			return state, &result
+			return state, &result, false
 		}
-		return state, nil
+		return state, nil, true
 	default:
-		return state, nil
+		return state, nil, false
 	}
+}
+
+// stepSubagents executes a fan-out and merges the results into the parent.
+//
+// Every child is a durable task running the same kernel loop, so a fan-out is
+// resumable and auditable rather than a set of in-memory calls. The parent never
+// yields ownership: it commits every event, and the children's contributions
+// arrive as an observation it can read on the next model call.
+func (k *loopKernel) stepSubagents(ctx context.Context, state TaskState, stepNumber int, model ModelResponse, response ModelResponse) (StepResult, TaskState, *RunResult) {
+	r := k.runtime
+	policy := r.subagentPolicy
+	if policy.MaxParallel <= 0 {
+		policy = DefaultSubagentPolicy()
+	}
+
+	if err := r.commitEvent(&state, "SUBAGENTS_REQUESTED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": stepNumber,
+		"requests": response.SubagentRequests, "count": len(response.SubagentRequests),
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+
+	specs := subagentSpecsFromProposals(response.SubagentRequests)
+	if len(specs) == 0 {
+		// Every proposal was unusable (no objective). Failing the step is
+		// clearer than silently continuing with no work done.
+		result := r.failAndCommit(state, "MODEL_OUTPUT", errors.New("SUBAGENT_PROPOSALS_INVALID"))
+		return StepResult{}, state, &result
+	}
+
+	if k.depth >= policy.MaxDepth {
+		// Nesting is refused rather than truncated: a task that asked to
+		// delegate must learn it cannot, not silently receive nothing.
+		if err := r.commitEvent(&state, "SUBAGENT_REJECTED", map[string]any{
+			"turn_id": state.CurrentTurnID, "step": stepNumber,
+			"reason": ErrSubagentDepthExceeded.Error(), "depth": k.depth, "max_depth": policy.MaxDepth,
+		}); err != nil {
+			result := r.failAndCommit(state, "STORE", err)
+			return StepResult{}, state, &result
+		}
+		state.Observations = append(state.Observations, map[string]any{
+			"type": "subagents_rejected", "reason": ErrSubagentDepthExceeded.Error(), "max_depth": policy.MaxDepth,
+		})
+		if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{
+			"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "subagents_rejected",
+		}); err != nil {
+			result := r.failAndCommit(state, "STORE", err)
+			return StepResult{}, state, &result
+		}
+		return StepResult{Action: ActionCallModel, Model: &model, ModelText: response.Text}, state, nil
+	}
+
+	for _, spec := range specs {
+		if err := r.commitEvent(&state, "SUBAGENT_SPAWNED", map[string]any{
+			"turn_id": state.CurrentTurnID, "step": stepNumber,
+			"agent_id": spec.AgentID, "role": spec.Role, "objective": spec.Objective, "max_steps": spec.MaxSteps,
+		}); err != nil {
+			result := r.failAndCommit(state, "STORE", err)
+			return StepResult{}, state, &result
+		}
+	}
+
+	// A model can ask to fan out on every single step, and the detectors reason
+	// about repeated tool calls, so spawns are presented in that shape. Without
+	// this an unbounded fan-out is invisible to the guard: it would see no
+	// repetition at all while the task spawned children forever.
+	spawnCalls := make([]ToolCall, 0, len(specs))
+	for _, spec := range specs {
+		spawnCalls = append(spawnCalls, ToolCall{
+			CallID: "subagent:" + spec.AgentID, Name: "subagent",
+			Arguments: map[string]any{"agent_id": spec.AgentID, "objective": spec.Objective},
+		})
+	}
+	guarded, terminal, nudged := k.applyLoopGuard(state, spawnCalls)
+	if terminal != nil {
+		return StepResult{}, guarded, terminal
+	}
+	state = guarded
+	if nudged {
+		return StepResult{Action: ActionCallModel, Model: &model, ModelText: response.Text}, state, nil
+	}
+
+	runner := r.newSubagentRunner(state, k.auth, k.budget())
+	results := runner.run(ctx, specs)
+
+	for _, result := range results {
+		eventType := "SUBAGENT_COMPLETED"
+		if result.Status != "SUCCEEDED" {
+			eventType = "SUBAGENT_FAILED"
+		}
+		if err := r.commitEvent(&state, eventType, map[string]any{
+			"turn_id": state.CurrentTurnID, "step": stepNumber,
+			"agent_id": result.AgentID, "status": result.Status, "summary": result.Summary, "error": result.Error,
+		}); err != nil {
+			result2 := r.failAndCommit(state, "STORE", err)
+			return StepResult{}, state, &result2
+		}
+	}
+
+	merged := mergeSubagentResults(results, policy.RequireConsensus)
+	if err := r.commitEvent(&state, "SUBAGENTS_MERGED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": stepNumber, "merged": merged,
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	state.Observations = append(state.Observations, map[string]any{"type": "subagents_merged", "merged": merged})
+	if err := r.commitEvent(&state, "STEP_COMPLETED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": stepNumber, "outcome": "subagents",
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	return StepResult{Action: ActionCallModel, Model: &model, ModelText: response.Text, SubagentResults: results}, state, nil
 }

@@ -44,6 +44,8 @@ type runtimeConfig struct {
 	skillResolver SkillResolver
 	// streamBuffer overrides the per-run observation buffer.
 	streamBuffer int
+	// subagentPolicy bounds fan-out.
+	subagentPolicy SubagentPolicy
 }
 
 // WithStreamBuffer sets how many observation frames a streamed run may queue
@@ -361,6 +363,9 @@ func New(opts ...Option) (*Runtime, error) {
 	if cfg.newID == nil {
 		cfg.newID = NewID
 	}
+	if cfg.subagentPolicy.MaxParallel <= 0 {
+		cfg.subagentPolicy = DefaultSubagentPolicy()
+	}
 	if cfg.streamBuffer <= 0 {
 		cfg.streamBuffer = defaultStreamBuffer
 	}
@@ -415,5 +420,6 @@ func New(opts ...Option) (*Runtime, error) {
 		emitter:        cfg.emitter,
 		loopGuard:      cfg.loopGuard,
 		streamBuffer:   cfg.streamBuffer,
+		subagentPolicy: cfg.subagentPolicy,
 	}, nil
 }
