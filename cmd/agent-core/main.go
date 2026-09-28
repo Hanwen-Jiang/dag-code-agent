@@ -34,6 +34,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/Hanwen-Jiang/dag-code-agent/harness"
 	"github.com/Hanwen-Jiang/dag-code-agent/packages/embedding"
 	"github.com/Hanwen-Jiang/dag-code-agent/packages/sandbox/wasi"
 	"github.com/Hanwen-Jiang/dag-code-agent/packages/vectordb"
@@ -191,6 +192,9 @@ type agentCore struct {
 	degraded []string // subsystems running in degraded (local) mode
 	cfg      config
 	started  time.Time
+	// idempotency deduplicates retried tool executions. The workflow layer
+	// supplies a stable key per step; without a consumer it would be decorative.
+	idempotency harness.IdempotencyStore
 }
 
 func newAgentCore(logger *zap.Logger, cfg config) (*agentCore, error) {
@@ -205,11 +209,12 @@ func newAgentCore(logger *zap.Logger, cfg config) (*agentCore, error) {
 	}
 
 	core := &agentCore{
-		logger:  logger,
-		sandbox: sandbox,
-		cfg:     cfg,
-		llm:     newLLMClient(cfg.llmServiceAddr),
-		started: time.Now(),
+		logger:      logger,
+		sandbox:     sandbox,
+		cfg:         cfg,
+		llm:         newLLMClient(cfg.llmServiceAddr),
+		started:     time.Now(),
+		idempotency: harness.NewInMemoryStore(),
 	}
 	core.initVectorAndRAG()
 	return core, nil
@@ -329,10 +334,98 @@ func (c *agentCore) ExecuteTask(ctx context.Context, in *pb.ExecuteTaskRequest) 
 	}
 
 	if spec, ok := parseToolCall(in.GetQuery()); ok {
-		return c.executeTool(ctx, spec, in.GetConfig())
+		// Tool execution can have side effects, so a retried step must not run
+		// it twice. The workflow layer derives the key from the step's inputs,
+		// which makes two identical requests collapse onto one execution.
+		return c.idempotentTool(ctx, spec, in)
 	}
 
 	return c.executeRAG(ctx, in.GetQuery())
+}
+
+// toolOutcome is the cached projection of a tool execution. Only the fields a
+// caller acts on are stored; the cache must not become a second source of truth
+// for the response shape.
+type toolOutcome struct {
+	Status  int32  `json:"status"`
+	Output  string `json:"output"`
+	Sandbox bool   `json:"sandbox"`
+}
+
+// idempotencyScope namespaces this service's keys.
+const idempotencyScope = "agent-core:tool"
+
+// idempotencyKeyOf reads the key the workflow layer attaches to the request.
+func idempotencyKeyOf(in *pb.ExecuteTaskRequest) string {
+	if in == nil {
+		return ""
+	}
+	headers := in.GetMetadata().GetHeaders()
+	if headers == nil {
+		return ""
+	}
+	for name, value := range headers {
+		if strings.EqualFold(name, "idempotency-key") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// idempotentTool executes a tool call at most once per key.
+//
+// The workflow layer raises its activity timeout so a sandbox step can run long;
+// a longer timeout also means a retry can land after the first attempt actually
+// succeeded. Deduplicating here is what makes the key meaningful rather than
+// merely transmitted.
+func (c *agentCore) idempotentTool(ctx context.Context, spec *toolCall, in *pb.ExecuteTaskRequest) (*pb.ExecuteTaskResponse, error) {
+	key := idempotencyKeyOf(in)
+	return c.runToolOnce(key, spec.Tool, func() (*pb.ExecuteTaskResponse, error) {
+		return c.executeTool(ctx, spec, in.GetConfig())
+	})
+}
+
+// runToolOnce returns the recorded outcome for key or executes the call and
+// records it. An empty key or a missing store disables deduplication.
+//
+// Only SUCCESSFUL executions are recorded. Memoizing a failure would make a
+// transient error permanent for the life of the key: a retry would replay the
+// same failure instead of retrying, which is the opposite of what idempotency is
+// for. The cost is that a genuinely non-retryable failure is re-executed on
+// retry, which is the safer direction for a bounded number of attempts.
+func (c *agentCore) runToolOnce(key, toolName string, execute func() (*pb.ExecuteTaskResponse, error)) (*pb.ExecuteTaskResponse, error) {
+	if key == "" || c.idempotency == nil {
+		return execute()
+	}
+	var prior toolOutcome
+	if found, err := c.idempotency.GetIdempotency(idempotencyScope, key, &prior); err == nil && found {
+		if c.logger != nil {
+			c.logger.Info("tool execution deduplicated", zap.String("idempotency_key", key), zap.String("tool", toolName))
+		}
+		return &pb.ExecuteTaskResponse{
+			Status:  pb.TaskStatus(prior.Status),
+			Output:  prior.Output,
+			Sandbox: prior.Sandbox,
+			Metadata: &structpb.Struct{Fields: map[string]*structpb.Value{
+				"deduplicated": structpb.NewBoolValue(true),
+			}},
+		}, nil
+	}
+	response, err := execute()
+	if err != nil || response == nil {
+		return response, err
+	}
+	if response.Status != pb.TaskStatus_TASK_STATUS_COMPLETED {
+		return response, nil
+	}
+	outcome := toolOutcome{Status: int32(response.Status), Output: response.Output, Sandbox: response.Sandbox}
+	if _, putErr := c.idempotency.PutIdempotency(idempotencyScope, key, outcome); putErr != nil {
+		// A cache failure must not fail an execution that already happened.
+		if c.logger != nil {
+			c.logger.Warn("could not record idempotency outcome", zap.String("idempotency_key", key), zap.Error(putErr))
+		}
+	}
+	return response, nil
 }
 
 // StreamExecuteTask streams progress: a started update, then the terminal

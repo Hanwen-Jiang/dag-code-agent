@@ -44,6 +44,15 @@ check() { # name condition...
   fi
 }
 
+check_match() { # name pattern text
+  local name=$1 pattern=$2 text=$3
+  if printf '%s' "$text" | grep -q "$pattern"; then
+    echo "  ok: $name"; PASS=$((PASS+1))
+  else
+    echo "  FAIL: $name"; FAIL=$((FAIL+1))
+  fi
+}
+
 echo "=== 1. agent-harness (control plane) ==="
 HARNESS_DB_PATH=$(mktemp -d)/harness.sqlite \
   "$BIN/agent-harness" -mode server -addr 127.0.0.1:18080 >/tmp/harness.log 2>&1 &
@@ -95,13 +104,36 @@ check "health"     curl -sf http://127.0.0.1:18030/health
 check "traces api" curl -sf http://127.0.0.1:18030/api/traces
 check "static ui"  curl -sf http://127.0.0.1:18030/index.html
 
-echo "=== 5. orchestrator (workflow layer, degraded without Temporal) ==="
-ORCH_PORT=18083 TEMPORAL_PORT=19999 "$BIN/orchestrator" >/tmp/orch.log 2>&1 &
+echo "=== 5. orchestrator (workflow layer -> execution layer) ==="
+# Point the orchestrator at the agent-core started above. Without this the link
+# is never exercised: the default address (50051) has nothing behind it, so every
+# step would report a degradation and the wiring would be untested.
+AGENT_CORE_ADDR=127.0.0.1:18051 ORCH_PORT=18083 TEMPORAL_PORT=19999 "$BIN/orchestrator" >/tmp/orch.log 2>&1 &
 PIDS+=($!)
 wait_http http://127.0.0.1:18083/health "orchestrator" || true
 check "health" curl -sf http://127.0.0.1:18083/health
 check "local-mode query" curl -sf -X POST http://127.0.0.1:18083/agent/query \
   -H 'Content-Type: application/json' -d '{"query":"hello","model_tier":"offline"}'
+
+# The startup handshake must have found the execution layer, and its advertised
+# capabilities must be visible; this is what distinguishes "wired" from
+# "silently degraded".
+ORCH_HEALTH=$(curl -sf http://127.0.0.1:18083/health || true)
+check_match "agent-core handshake reachable" '"reachable": *true' "$ORCH_HEALTH"
+
+# A sandbox step must actually be executed BY agent-core over gRPC, not by the
+# local fallback. openssl is used for base64 because macOS and GNU base64 take
+# incompatible flags.
+WASM_B64=$(openssl base64 -A -in testdata/hello.wasm 2>/dev/null || true)
+if [ -n "$WASM_B64" ]; then
+  SANDBOX_RESPONSE=$(curl -sf -X POST http://127.0.0.1:18083/agent/query \
+    -H 'Content-Type: application/json' \
+    -d "{\"query\":\"run this code in the sandbox\",\"context\":{\"wasm_b64\":\"$WASM_B64\"}}" || true)
+  check_match "sandbox step executed by agent-core" '"agent-core"' "$SANDBOX_RESPONSE"
+  check_match "agent-core returned real WASI output" 'hello from wasi' "$SANDBOX_RESPONSE"
+else
+  echo "  FAIL: encode testdata/hello.wasm"; FAIL=$((FAIL+1))
+fi
 
 echo "=== 6. self-evolution (offline baseline) ==="
 # macOS has no `timeout`; fall back to a background kill.
