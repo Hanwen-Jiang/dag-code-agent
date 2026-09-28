@@ -109,7 +109,7 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 
 		switch action.Kind {
 		case ActionCallModel:
-			result, nextState, terminal := k.stepModel(ctx, state)
+			result, nextState, terminal := k.stepModel(ctx, state, action.Guidance)
 			state = nextState
 			if terminal != nil {
 				return *terminal
@@ -218,7 +218,7 @@ func (k *loopKernel) refresh(view LoopState, state TaskState) LoopState {
 //
 // It returns the StepResult for the strategy, the updated state, and a
 // non-nil result when the run reached a terminal state inside the step.
-func (k *loopKernel) stepModel(ctx context.Context, state TaskState) (StepResult, TaskState, *RunResult) {
+func (k *loopKernel) stepModel(ctx context.Context, state TaskState, guidance []string) (StepResult, TaskState, *RunResult) {
 	r := k.runtime
 	request := k.request
 	stepNumber := state.Step + 1
@@ -237,6 +237,18 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState) (StepResult
 		return StepResult{}, state, &result
 	}
 	modelRequest := ModelRequest{TaskID: state.TaskID, Messages: packet.ProviderMessages(), Tools: packet.Tools, ResponseSchema: request.ResponseSchema, Model: request.Model, ReasoningEffort: request.ReasoningEffort, MaxOutputTokens: request.MaxOutputTokens, PrefixCacheKey: packet.PrefixCacheKey}
+	if len(guidance) > 0 {
+		// Appended after the compiled messages rather than replacing them, so a
+		// strategy can add an instruction without discarding the task's history.
+		for _, instruction := range guidance {
+			if instruction == "" {
+				continue
+			}
+			modelRequest.Messages = append(modelRequest.Messages, map[string]any{
+				"role": "developer", "content": instruction,
+			})
+		}
+	}
 	requestDigest, _ := Digest(modelRequest)
 	state.LastModelRequestDigest = requestDigest
 	contextPayload := map[string]any{

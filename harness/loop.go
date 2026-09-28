@@ -129,7 +129,12 @@ type FinishSpec struct {
 // Action is one instruction to the kernel. Exactly one payload field is
 // meaningful, selected by Kind.
 type Action struct {
-	Kind      ActionKind
+	Kind ActionKind
+	// Model is validated by ValidateAction but NOT consulted by the kernel:
+	// stepModel builds the request from the compiled context packet, so a
+	// strategy that supplies one and expects it to be sent will see no effect.
+	// Use Guidance to add to the request. Kept because removing a public field
+	// is a breaking change; see the strategy contract in the foundation design.
 	Model     *ModelRequest
 	Tools     []ToolCall
 	Subagents []SubagentSpec
@@ -137,6 +142,14 @@ type Action struct {
 	Handoff   *SubagentSpec
 	Finish    *FinishSpec
 	Search    string
+	// Guidance is appended to the model request the kernel builds, after the
+	// compiled context. It is how a strategy shapes what the model sees without
+	// replacing the context — the previous choice was between an unused Model
+	// field and a request that discards the task's own history.
+	//
+	// It is part of the request digest, so a replayed run sends what the
+	// original sent.
+	Guidance []string
 }
 
 // BudgetSnapshot is a read-only view of the ledger, so a strategy can adapt to
@@ -284,9 +297,12 @@ var ErrStrategyContract = errors.New("strategy contract violation")
 func ValidateAction(a Action) error {
 	switch a.Kind {
 	case ActionCallModel:
-		if a.Model == nil {
-			return fmt.Errorf("%w: %s requires Model", ErrStrategyContract, a.Kind)
-		}
+		// Model is deliberately NOT required. The kernel builds the request from
+		// the compiled context packet — context compilation is the core's job,
+		// and a strategy supplying its own request would bypass the budget,
+		// spill and prefix-cache accounting. Requiring a field that is then
+		// ignored forced every strategy author to construct one for nothing and
+		// implied it would be sent. Use Guidance to shape the request.
 	case ActionCallTools:
 		if len(a.Tools) == 0 {
 			return fmt.Errorf("%w: %s requires at least one tool call", ErrStrategyContract, a.Kind)

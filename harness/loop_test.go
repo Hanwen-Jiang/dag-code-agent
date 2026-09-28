@@ -107,7 +107,9 @@ func TestBudgetSnapshotHelpers(t *testing.T) {
 
 func TestValidateActionRejectsMalformedActions(t *testing.T) {
 	cases := []Action{
-		{Kind: ActionCallModel},
+		// ActionCallModel is deliberately absent: the kernel builds the request
+		// from the compiled context packet, so a bare call_model is valid and
+		// requiring a Model field that is then ignored was misleading.
 		{Kind: ActionCallTools},
 		{Kind: ActionSpawn},
 		{Kind: ActionHandoff},
@@ -122,7 +124,10 @@ func TestValidateActionRejectsMalformedActions(t *testing.T) {
 		}
 	}
 	valid := []Action{
-		{Kind: ActionCallModel, Model: &ModelRequest{}},
+		// A bare call_model: the strategy asks for a model call and the kernel
+		// supplies the request. Guidance is how it adds to that request.
+		{Kind: ActionCallModel},
+		{Kind: ActionCallModel, Guidance: []string{"an instruction"}},
 		{Kind: ActionCallTools, Tools: []ToolCall{{CallID: "c"}}},
 		{Kind: ActionSpawn, Subagents: []SubagentSpec{{AgentID: "a"}}},
 		{Kind: ActionHandoff, Handoff: &SubagentSpec{AgentID: "a"}},
