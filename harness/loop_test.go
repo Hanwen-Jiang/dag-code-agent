@@ -202,18 +202,20 @@ func (versionlessStrategy) Version() string                                 { re
 func (versionlessStrategy) Next(context.Context, LoopState) (Action, error) { return Action{}, nil }
 func (versionlessStrategy) OnResult(st LoopState, _ StepResult) LoopState   { return st }
 
-// ActionFanout and ActionRunDAG are refused, and the refusal must say what is
-// missing rather than looking like a bug in the strategy.
+// ActionRunDAG is refused, and the refusal must say what is missing rather than
+// looking like a bug in the strategy.
 //
-// They are not implemented for concrete reasons, recorded on the types rather
-// than left to be rediscovered:
+// It is not implemented for a structural reason rather than an effort one: a
+// run-DAG action would need the dag package's types, and harness/dag imports
+// harness, so the core cannot reference them without an import cycle. A strategy
+// that wants a DAG expresses it as a sequence of spawns, which makes this a
+// convenience gap and not a capability gap.
 //
-//   - FanoutSpec carries Scorer, Prune and Rounds, which need a scorer registry
-//     the runtime does not have. Implementing Branches alone would leave three
-//     declared fields silently inert.
-//   - A run-DAG action would need the dag package's types, and harness/dag
-//     imports harness, so the core cannot reference them without an import
-//     cycle. A strategy that wants a DAG expresses it as a sequence of spawns.
+// ActionFanout used to be listed here too. It is implemented now — see
+// scorer_test.go — so this test records the remaining refusal rather than the
+// decision it was written to record. The same happened to
+// TestValidateActionRejectsMalformedActions when call_model stopped requiring a
+// Model: a test that encodes a decision has to move when the decision does.
 func TestUnimplementedActionsFailWithAClearReason(t *testing.T) {
 	store := NewInMemoryStore()
 	defer store.Close()
@@ -221,7 +223,7 @@ func TestUnimplementedActionsFailWithAClearReason(t *testing.T) {
 		WithModel(NewScriptedModel([]ModelResponse{{Text: "unused", FinishReason: "stop"}})),
 		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))),
 		WithIDSource(sequentialIDs()),
-		WithStrategyInstance(&fanoutStrategy{}))
+		WithStrategyInstance(&runDAGStrategy{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +231,7 @@ func TestUnimplementedActionsFailWithAClearReason(t *testing.T) {
 	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
 
 	result, err := runtime.Run(context.Background(), TaskRequest{
-		TaskID: "fanout", Goal: "try several approaches", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 4,
+		TaskID: "rundag", Goal: "run a plan as a graph", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 4,
 	}, auth)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -238,7 +240,7 @@ func TestUnimplementedActionsFailWithAClearReason(t *testing.T) {
 		t.Fatalf("status=%s category=%s, want FAILED/STRATEGY", result.Status, result.FailureCategory)
 	}
 	message := stringValue(result.State.LastError["message"])
-	if !contains(message, "fanout") {
+	if !contains(message, "run_dag") {
 		t.Fatalf("the refusal does not name the action: %q", message)
 	}
 	// It must be the contract error, not a crash or a silent no-op, so a
@@ -248,14 +250,14 @@ func TestUnimplementedActionsFailWithAClearReason(t *testing.T) {
 	}
 }
 
-// fanoutStrategy emits the one action the kernel refuses.
-type fanoutStrategy struct{}
+// runDAGStrategy emits the one action the kernel refuses.
+type runDAGStrategy struct{}
 
-func (fanoutStrategy) Name() string    { return "fanout-test" }
-func (fanoutStrategy) Version() string { return "1.0.0" }
+func (runDAGStrategy) Name() string    { return "rundag-test" }
+func (runDAGStrategy) Version() string { return "1.0.0" }
 
-func (fanoutStrategy) Next(context.Context, LoopState) (Action, error) {
-	return Action{Kind: ActionFanout, Fanout: &FanoutSpec{Branches: 3, Prune: 1}}, nil
+func (runDAGStrategy) Next(context.Context, LoopState) (Action, error) {
+	return Action{Kind: ActionRunDAG}, nil
 }
 
-func (fanoutStrategy) OnResult(st LoopState, _ StepResult) LoopState { return st }
+func (runDAGStrategy) OnResult(st LoopState, _ StepResult) LoopState { return st }

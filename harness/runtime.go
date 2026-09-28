@@ -72,6 +72,8 @@ type Runtime struct {
 	watchdog WatchdogPolicy
 	// hookBus receives lifecycle events.
 	hookBus HookBus
+	// scorers ranks fan-out branches by name.
+	scorers map[string]Scorer
 	// running maps a live task to the function that cancels its context. It is
 	// guarded by its own lock rather than r.mu, because r.mu is held for the
 	// whole duration of a run: a caller asking to cancel would have to wait for

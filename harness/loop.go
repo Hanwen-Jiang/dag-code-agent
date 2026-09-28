@@ -64,6 +64,9 @@ var knownEventTypes = []string{
 	"SUBAGENTS_MERGED",
 	// Emitted when a strategy resolves tool schemas explicitly.
 	"TOOL_SEARCHED",
+	// Best-of-N sampling vocabulary.
+	"FANOUT_STARTED",
+	"FANOUT_SCORED",
 	"TOOLS_EXECUTED",
 	"SUBAGENTS_REQUESTED",
 	"VERIFIER_REJECTED",
@@ -111,8 +114,9 @@ const (
 // kernel like any other action.
 // FanoutSpec describes kernel-level best-of-N sampling.
 //
-// NOT YET HONORED. The kernel refuses ActionFanout with ErrStrategyContract, and
-// this comment says why rather than leaving the fields looking implemented.
+// Branches, Personas, Scorer and Prune are honoured. Temperature and Rounds are
+// NOT: the kernel refuses them rather than accepting and ignoring them, and the
+// reasons are below.
 //
 // Branches alone would be expressible today as ActionSpawn: run these subagents
 // and take all their results. What makes a fan-out distinct is the rest of the

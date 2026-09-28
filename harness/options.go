@@ -59,6 +59,8 @@ type runtimeConfig struct {
 	hookBus HookBus
 	// systemPrompt supplies the first stable message.
 	systemPrompt SystemPromptProvider
+	// scorers ranks fan-out branches by name.
+	scorers map[string]Scorer
 }
 
 // WithStreamBuffer sets how many observation frames a streamed run may queue
@@ -460,6 +462,7 @@ func New(opts ...Option) (*Runtime, error) {
 		subagentPolicy: cfg.subagentPolicy,
 		watchdog:       cfg.watchdog,
 		hookBus:        cfg.hookBus,
+		scorers:        cfg.scorers,
 		baseCtx:        baseCtx,
 		baseCancel:     baseCancel,
 	}, nil

@@ -160,6 +160,14 @@ func (k *loopKernel) run(ctx context.Context, state TaskState) RunResult {
 			}
 			view = k.strategy.OnResult(k.refresh(view, state), result)
 
+		case ActionFanout:
+			result, nextState, terminal := k.stepFanout(ctx, state, action.Fanout)
+			state = nextState
+			if terminal != nil {
+				return *terminal
+			}
+			view = k.strategy.OnResult(k.refresh(view, state), result)
+
 		case ActionSearchTools:
 			// The strategy asks for tool schemas explicitly, which is what makes
 			// a deferred catalogue usable by a strategy rather than only by the
@@ -878,4 +886,91 @@ func cancellationMessage(ctx context.Context) string {
 		return err.Error()
 	}
 	return "cancelled"
+}
+
+// stepFanout samples several attempts at the task, scores them and keeps the best.
+//
+// FanoutSpec declares more than this implements, and the unimplemented parts are
+// REFUSED rather than ignored:
+//
+//   - Temperature has no field on ModelRequest, so it cannot reach the adapter.
+//     Accepting it would make it decorative.
+//   - Rounds above one needs a comparison between rounds — what to carry forward
+//     from the previous sample — and that is a design, not a loop.
+//
+// Branches, Personas, Scorer and Prune are honoured, so every field that is
+// accepted does something.
+func (k *loopKernel) stepFanout(ctx context.Context, state TaskState, spec *FanoutSpec) (StepResult, TaskState, *RunResult) {
+	r := k.runtime
+	if spec == nil || spec.Branches < 1 {
+		result := r.failAndCommit(state, "STRATEGY", errors.New("FANOUT_INVALID: Branches must be at least one"))
+		return StepResult{}, state, &result
+	}
+	if spec.Temperature != 0 {
+		result := r.failAndCommit(state, "STRATEGY", errors.New("FANOUT_TEMPERATURE_UNSUPPORTED: ModelRequest carries no temperature, so it could not reach the adapter"))
+		return StepResult{}, state, &result
+	}
+	if spec.Rounds > 1 {
+		result := r.failAndCommit(state, "STRATEGY", fmt.Errorf("FANOUT_ROUNDS_UNSUPPORTED: %d rounds needs a rule for carrying results between rounds", spec.Rounds))
+		return StepResult{}, state, &result
+	}
+	scorer, err := r.scorerFor(spec.Scorer)
+	if err != nil {
+		result := r.failAndCommit(state, "STRATEGY", err)
+		return StepResult{}, state, &result
+	}
+
+	specs := make([]SubagentSpec, 0, spec.Branches)
+	for index := 0; index < spec.Branches; index++ {
+		branch := SubagentSpec{
+			AgentID: fmt.Sprintf("branch-%d", index+1),
+			Role:    "sampler",
+		}
+		if index < len(spec.Personas) {
+			branch.Objective = fmt.Sprintf("%s. Task: %s", spec.Personas[index], state.Goal)
+			branch.Role = spec.Personas[index]
+		} else {
+			branch.Objective = state.Goal
+		}
+		specs = append(specs, branch)
+	}
+
+	stepNumber := state.Step
+	if err := r.commitEvent(&state, "FANOUT_STARTED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": stepNumber,
+		"branches": spec.Branches, "scorer": spec.Scorer, "prune": spec.Prune,
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+
+	fanoutResult, nextState, terminal := k.executeFanout(ctx, state, stepNumber, specs, "fanout")
+	state = nextState
+	if terminal != nil {
+		return StepResult{}, state, terminal
+	}
+
+	scored := scoreBranches(ctx, scorer, state.Goal, fanoutResult.SubagentResults)
+	kept := pruneBranches(scored, spec.Prune)
+
+	ratings := make([]map[string]any, 0, len(scored))
+	for index, branch := range scored {
+		entry := map[string]any{"agent_id": branch.result.AgentID, "score": branch.score, "kept": index < len(kept)}
+		if branch.err != nil {
+			// A scorer failure is recorded, not hidden: an unscored branch must
+			// not look like one that was rated and rejected.
+			entry["score_error"] = branch.err.Error()
+		}
+		ratings = append(ratings, entry)
+	}
+	if err := r.commitEvent(&state, "FANOUT_SCORED", map[string]any{
+		"turn_id": state.CurrentTurnID, "step": stepNumber, "ratings": ratings, "kept": len(kept),
+	}); err != nil {
+		result := r.failAndCommit(state, "STORE", err)
+		return StepResult{}, state, &result
+	}
+	state.Observations = append(state.Observations, map[string]any{
+		"type": "fanout_scored", "scorer": spec.Scorer, "kept": kept, "ratings": ratings,
+	})
+	return StepResult{Action: ActionFanout, SubagentResults: kept}, state, nil
 }
