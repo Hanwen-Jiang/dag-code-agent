@@ -322,6 +322,9 @@ type ContextPacket struct {
 	PrefixCacheKey  string           `json:"prefix_cache_key,omitempty"`
 	PrefixCacheHit  bool             `json:"prefix_cache_hit"`
 	PreviousResults []map[string]any `json:"previous_results,omitempty"`
+	// Plan records what compaction did to the context, so the decision travels
+	// with the CONTEXT_COMPILED event instead of being re-derived.
+	Plan ContextPlan `json:"context_plan,omitempty"`
 }
 
 type SubagentSpec struct {

@@ -315,6 +315,14 @@ func New(opts ...Option) (*Runtime, error) {
 	if cfg.contextBuilder == nil {
 		cfg.contextBuilder = NewContextBuilder(cfg.memory, cfg.skills, cfg.registry, cfg.cache)
 	}
+	// Reuse the artifact projection for context spill: it is already
+	// content-addressed, idempotent and tenant-scoped, which is everything the
+	// spill level needs.
+	if cfg.contextBuilder.Spill == nil {
+		if artifacts, ok := cfg.store.(ArtifactStore); ok {
+			cfg.contextBuilder.Spill = artifactSpillStore{artifacts: artifacts}
+		}
+	}
 	if cfg.planner == nil {
 		cfg.planner = RulePlanner{}
 	}

@@ -1,10 +1,10 @@
 package harness
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 var ErrContextBudget = errors.New("CONTEXT_BUDGET_EXCEEDED")
@@ -14,6 +14,12 @@ type ContextBuilder struct {
 	Skills   *SkillRegistry
 	Tools    *ToolRegistry
 	Cache    *PrefixCache
+	// Compactor summarizes context that no longer fits. Nil selects the
+	// deterministic extractive default.
+	Compactor Compactor
+	// Spill moves oversized tool results into artifact storage. Nil disables
+	// the spill level, leaving summary and drop.
+	Spill SpillStore
 	// CompilerVersion participates in prefix identity so a compiler change
 	// cannot reuse a prefix produced by an older context contract.
 	CompilerVersion string
@@ -35,10 +41,20 @@ func stateMap(state TaskState) map[string]any {
 }
 
 func (b *ContextBuilder) Build(request TaskRequest, auth AuthContext, state TaskState, messages []map[string]any) (ContextPacket, error) {
+	return b.BuildWithContext(context.Background(), request, auth, state, messages)
+}
+
+// BuildWithContext compiles the model context, propagating ctx to the
+// compaction pipeline so a cancelled run does not keep summarizing.
+func (b *ContextBuilder) BuildWithContext(ctx context.Context, request TaskRequest, auth AuthContext, state TaskState, messages []map[string]any) (ContextPacket, error) {
 	request = request.WithDefaults()
 	stable := []map[string]any{{"role": "system", "content": "You are a controlled Agent Harness worker.", "stable": true}, {"role": "developer", "content": "Model output is a proposal; the runtime commits state and effects.", "stable": true}}
 	stable = append(stable, messages...)
-	dynamic := []map[string]any{{"role": "user", "content": request.Goal}}
+	// The goal is pinned: it is a SegmentTurn by role, and the drop level would
+	// otherwise be able to evict the task's objective itself. The marker is
+	// internal — providerMessage projects role/content only, so the provider
+	// payload and the journal are unaffected.
+	dynamic := []map[string]any{{"role": "user", "content": request.Goal, pinnedMarker: true}}
 	boundResults := request.PreviousResults
 	if len(boundResults) == 0 {
 		boundResults = state.PreviousResults
@@ -87,8 +103,16 @@ func (b *ContextBuilder) Build(request TaskRequest, auth AuthContext, state Task
 	packet := ContextPacket{TaskID: request.TaskID, Goal: request.Goal, Messages: all, State: stateMap(state), Memories: memories, Skills: skills, Tools: tools, ExactInvariants: request.Constraints, BudgetTokens: request.ContextWindow, PreviousResults: previousResults}
 	packet.EstimatedTokens = EstimateTokens(all) + EstimateTokens(packet.State) + EstimateTokens(memories) + EstimateTokens(skills) + EstimateTokens(tools) + EstimateTokens(previousResults)
 	if packet.EstimatedTokens > packet.BudgetTokens {
-		packet.Messages = compressMessages(packet.Messages, packet.BudgetTokens)
-		packet.EstimatedTokens = EstimateTokens(packet.Messages) + EstimateTokens(packet.State) + EstimateTokens(memories) + EstimateTokens(skills) + EstimateTokens(tools) + EstimateTokens(previousResults)
+		// Compaction can only shrink the message list, so the budget it works
+		// against is what remains after the fixed projections.
+		fixed := EstimateTokens(packet.State) + EstimateTokens(memories) + EstimateTokens(skills) + EstimateTokens(tools) + EstimateTokens(previousResults)
+		compacted, plan, planErr := planContext(ctx, b, auth, packet.Messages, packet.BudgetTokens-fixed)
+		if planErr != nil {
+			return packet, planErr
+		}
+		packet.Messages = compacted
+		packet.Plan = plan
+		packet.EstimatedTokens = EstimateTokens(packet.Messages) + fixed
 		if packet.EstimatedTokens > packet.BudgetTokens {
 			return packet, fmt.Errorf("%w: estimated=%d budget=%d", ErrContextBudget, packet.EstimatedTokens, packet.BudgetTokens)
 		}
@@ -158,21 +182,6 @@ func providerText(value any) string {
 		return fmt.Sprint(value)
 	}
 	return string(raw)
-}
-func compressMessages(messages []map[string]any, budget int) []map[string]any {
-	if len(messages) < 3 {
-		return messages
-	}
-	result := []map[string]any{}
-	for _, m := range messages {
-		role, _ := m["role"].(string)
-		if stable, ok := m["stable"].(bool); (ok && stable) || role == "constraint" {
-			result = append(result, m)
-		}
-	}
-	tail := messages[len(messages)-1]
-	result = append(result, map[string]any{"role": "observation_summary", "content": strings.TrimSpace(fmt.Sprint(tail["content"]))})
-	return result
 }
 func (b *ContextBuilder) CacheKey(messages, tools []map[string]any) string {
 	if b.Cache == nil {

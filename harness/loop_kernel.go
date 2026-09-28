@@ -155,7 +155,7 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState, seen map[st
 		return StepResult{}, state, &result
 	}
 
-	packet, err := r.contextBuilder.Build(request, k.auth, state, nil)
+	packet, err := r.contextBuilder.BuildWithContext(ctx, request, k.auth, state, nil)
 	if err != nil {
 		result := r.failAndCommit(state, "CONTEXT", err)
 		return StepResult{}, state, &result
@@ -163,7 +163,7 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState, seen map[st
 	modelRequest := ModelRequest{TaskID: state.TaskID, Messages: packet.ProviderMessages(), Tools: packet.Tools, ResponseSchema: request.ResponseSchema, Model: request.Model, ReasoningEffort: request.ReasoningEffort, MaxOutputTokens: request.MaxOutputTokens, PrefixCacheKey: packet.PrefixCacheKey}
 	requestDigest, _ := Digest(modelRequest)
 	state.LastModelRequestDigest = requestDigest
-	if err := r.commitEvent(&state, "CONTEXT_COMPILED", map[string]any{
+	contextPayload := map[string]any{
 		"turn_id":          state.CurrentTurnID,
 		"step":             stepNumber,
 		"compiler_version": r.contextBuilder.CompilerVersion,
@@ -172,7 +172,14 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState, seen map[st
 		"prefix_cache_key": packet.PrefixCacheKey,
 		"prefix_cache_hit": packet.PrefixCacheHit,
 		"exact_invariants": packet.ExactInvariants,
-	}); err != nil {
+	}
+	// The compaction decision is only recorded when it happened, so a run that
+	// fits its budget produces exactly the journal it produced before the
+	// context-lifecycle work landed.
+	if packet.Plan.Compacted {
+		contextPayload["context_plan"] = packet.Plan.Payload()
+	}
+	if err := r.commitEvent(&state, "CONTEXT_COMPILED", contextPayload); err != nil {
 		result := r.failAndCommit(state, "STORE", err)
 		return StepResult{}, state, &result
 	}
