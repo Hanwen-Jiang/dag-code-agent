@@ -681,11 +681,30 @@ func (k *loopKernel) executeFanout(ctx context.Context, state TaskState, stepNum
 		return StepResult{Action: ActionCallModel}, state, nil
 	}
 
+	// Selection before execution: a proposal matched to nothing would otherwise
+	// spend real budget producing an answer nobody needed.
+	requirements := teamRequirements(state.Goal)
+	kept, rejected := filterByFit(specs, requirements, policy.MinAgentFit)
+	for _, entry := range rejected {
+		if err := r.commitEvent(&state, "SUBAGENT_REJECTED", map[string]any{
+			"turn_id": state.CurrentTurnID, "step": stepNumber, "reason": "AGENT_FIT_BELOW_MINIMUM", "rejected": entry,
+		}); err != nil {
+			result := r.failAndCommit(state, "STORE", err)
+			return StepResult{}, state, &result
+		}
+	}
+	if len(kept) == 0 {
+		result := r.failAndCommit(state, "STRATEGY", errors.New("NO_SUITABLE_SUBAGENTS: every proposed agent scored below the configured minimum fit"))
+		return StepResult{}, state, &result
+	}
+	specs = kept
+
 	for _, spec := range specs {
+		fit := agentFitScore(spec, requirements)
 		if err := r.commitEvent(&state, "SUBAGENT_SPAWNED", map[string]any{
 			"turn_id": state.CurrentTurnID, "step": stepNumber,
 			"agent_id": spec.AgentID, "role": spec.Role, "objective": spec.Objective, "max_steps": spec.MaxSteps,
-			"origin": origin,
+			"origin": origin, "fit_score": fit,
 		}); err != nil {
 			result := r.failAndCommit(state, "STORE", err)
 			return StepResult{}, state, &result

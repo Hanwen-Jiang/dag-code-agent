@@ -47,6 +47,9 @@ type SubagentPolicy struct {
 	// RequireConsensus marks a fan-out whose disagreeing children are reported
 	// as a conflict rather than silently merged.
 	RequireConsensus bool
+	// MinAgentFit refuses a proposed agent whose match to the task is below
+	// this score. Zero keeps every proposal.
+	MinAgentFit float64
 }
 
 // DefaultSubagentPolicy returns the policy used when none is configured.
