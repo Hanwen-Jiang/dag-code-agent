@@ -70,6 +70,8 @@ type Runtime struct {
 	subagentPolicy SubagentPolicy
 	// watchdog bounds how long a live run may take or stay silent.
 	watchdog WatchdogPolicy
+	// hookBus receives lifecycle events.
+	hookBus HookBus
 	// running maps a live task to the function that cancels its context. It is
 	// guarded by its own lock rather than r.mu, because r.mu is held for the
 	// whole duration of a run: a caller asking to cancel would have to wait for
@@ -254,6 +256,20 @@ var ErrInfrastructure = errors.New("infrastructure failure")
 //     can observe context.Canceled / context.DeadlineExceeded.
 //   - a store/journal failure returns (result, ErrInfrastructure-wrapped err).
 func (r *Runtime) finish(ctx context.Context, result RunResult) (RunResult, error) {
+	// Every terminal outcome passes through here, which is why the finished
+	// event is published at this single point rather than at each return.
+	defer func() {
+		code := ""
+		if value, ok := result.State.LastError["code"].(string); ok {
+			code = value
+		}
+		r.publishHook(ctx, LifecycleEvent{
+			Kind: LifecycleTaskFinished, TaskID: result.TaskID,
+			TenantID: result.State.TenantID, SubjectID: result.State.SubjectID,
+			Step: result.State.Step, Status: string(result.Status),
+			ErrorCode: code,
+		})
+	}()
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -324,6 +340,11 @@ func (r *Runtime) run(ctx context.Context, request TaskRequest, auth AuthContext
 	runCtx, endRun := r.beginRun(ctx, request.TaskID)
 	defer endRun()
 	ctx = runCtx
+	// Published here rather than in beginRun, which has no identity to report.
+	r.publishHook(ctx, LifecycleEvent{
+		Kind: LifecycleTaskStarted, TaskID: request.TaskID,
+		TenantID: request.TenantID, SubjectID: request.SubjectID,
+	})
 	if existing, _, err := r.store.GetTask(request.TaskID); err == nil {
 		stored := requestFromState(existing)
 		if stored.Goal != request.Goal || stored.TenantID != request.TenantID || stored.SubjectID != request.SubjectID {
@@ -699,6 +720,7 @@ func (r *Runtime) beginRun(ctx context.Context, taskID string) (context.Context,
 	// watchdog breaking a stall.
 	runCtx, cancel := context.WithCancelCause(ctx)
 	r.registerRun(taskID, cancel)
+
 	// Supervision starts with the run, so no caller has to remember to arm it.
 	r.startWatchdog(runCtx, cancel, taskID)
 	return runCtx, func() {

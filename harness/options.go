@@ -55,6 +55,8 @@ type runtimeConfig struct {
 	memoryRanker MemoryRanker
 	// toolAuthorizer may refuse a call the policy allowed.
 	toolAuthorizer ToolAuthorizer
+	// hookBus receives lifecycle events.
+	hookBus HookBus
 }
 
 // WithStreamBuffer sets how many observation frames a streamed run may queue
@@ -452,6 +454,7 @@ func New(opts ...Option) (*Runtime, error) {
 		streamBuffer:   cfg.streamBuffer,
 		subagentPolicy: cfg.subagentPolicy,
 		watchdog:       cfg.watchdog,
+		hookBus:        cfg.hookBus,
 		baseCtx:        baseCtx,
 		baseCancel:     baseCancel,
 	}, nil
