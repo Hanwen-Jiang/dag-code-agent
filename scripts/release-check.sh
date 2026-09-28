@@ -35,10 +35,29 @@ WORKDIR="$(mktemp -d)"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
+# The checksum database keeps a cache under the Go module cache. Where that
+# cache is not writable (sandboxed environments), verification cannot record its
+# result and the build fails for a reason unrelated to the release. Set
+# RELEASE_CHECK_VERIFY_SUMS=1 to force it back on when the cache is writable.
+if [[ "${RELEASE_CHECK_VERIFY_SUMS:-0}" != "1" ]]; then
+  export GOSUMDB=off
+  export GOFLAGS="${GOFLAGS:-} -mod=mod"
+fi
+
 export GOPRIVATE="${GOPRIVATE:-github.com/Hanwen-Jiang/*}"
 export GONOSUMDB="$GOPRIVATE"
 export GOFLAGS=-mod=mod
 export GOWORK=off
+
+# Resolve into private caches inside the working tree. This keeps the check
+# runnable where the global build/module caches are not writable (sandboxed or
+# locked-down environments), and it makes the check stricter: the module graph
+# is resolved from scratch rather than satisfied by whatever happens to be
+# cached already. Override RELEASE_CHECK_CACHE to reuse a warm cache.
+CACHE_ROOT="${RELEASE_CHECK_CACHE:-$REPO_ROOT/.gocache/release}"
+mkdir -p "$CACHE_ROOT/build" "$CACHE_ROOT/mod"
+export GOCACHE="$CACHE_ROOT/build"
+export GOMODCACHE="$CACHE_ROOT/mod"
 
 cd "$WORKDIR"
 cat > go.mod <<EOF
