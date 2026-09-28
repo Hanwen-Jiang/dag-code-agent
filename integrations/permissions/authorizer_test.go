@@ -28,14 +28,43 @@ func TestAdapterSatisfiesTheSeam(t *testing.T) {
 	var _ harness.ToolAuthorizer = NewAuthorizer(nil)
 }
 
-// A refusal from the engine must reach the caller, and must carry the engine's
-// own message rather than a generic one.
+// A refusal from the engine must reach the caller UNCHANGED.
+//
+// The previous version of this test logged whatever happened and asserted
+// nothing, so it could not fail: it claimed to check propagation while checking
+// only that no panic occurred. It now compares the adapter's result against the
+// engine's own, which tests propagation without having to know which rule fired —
+// that knowledge would make the test a restatement of the configuration rather
+// than a statement about the adapter.
 func TestAuthorizerPropagatesTheEngineRefusal(t *testing.T) {
-	authorizer := NewAuthorizerFromConfig(permissions.Config{})
-	// An empty config denies nothing, so the assertion is about the path being
-	// wired rather than about a specific rule: a panic or a nil dereference here
-	// would mean the adapter is not usable at all.
-	if err := authorizer.AuthorizeTool("any_tool", map[string]any{}); err != nil {
-		t.Logf("the default engine refused %q: %v", "any_tool", err)
+	config := permissions.Config{RequireApproval: true}
+	engine := permissions.NewPermissionEngine(config)
+	authorizer := NewAuthorizer(engine)
+
+	tool := "bash"
+	args := map[string]interface{}{"command": "frobnicate --all"}
+	direct := engine.Check(tool, args)
+	throughAdapter := authorizer.AuthorizeTool(tool, args)
+
+	if (direct == nil) != (throughAdapter == nil) {
+		t.Fatalf("the adapter changed whether the call was refused: engine=%v adapter=%v", direct, throughAdapter)
+	}
+	if direct == nil {
+		t.Fatal("the engine allowed a call with approval required and no handler, so nothing was propagated")
+	}
+	if direct.Error() != throughAdapter.Error() {
+		t.Fatalf("the adapter rewrote the refusal: engine=%q adapter=%q", direct.Error(), throughAdapter.Error())
+	}
+}
+
+// An allowed call must stay allowed through the adapter, or the seam would be a
+// blanket denial rather than a policy.
+func TestAuthorizerPropagatesAnAllowance(t *testing.T) {
+	engine := permissions.NewPermissionEngine(permissions.Config{})
+	authorizer := NewAuthorizer(engine)
+	direct := engine.Check("read_file", map[string]interface{}{"path": "/tmp/x"})
+	throughAdapter := authorizer.AuthorizeTool("read_file", map[string]interface{}{"path": "/tmp/x"})
+	if (direct == nil) != (throughAdapter == nil) {
+		t.Fatalf("the adapter disagreed with the engine on an allowance: engine=%v adapter=%v", direct, throughAdapter)
 	}
 }

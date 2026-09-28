@@ -29,14 +29,21 @@ func TestAgentFitScoresDeclaredCapabilitiesHigher(t *testing.T) {
 func TestFitDoesNotInventCapability(t *testing.T) {
 	requirements := teamRequirements("optimize the rust build pipeline")
 	empty := SubagentSpec{AgentID: "a", Role: "engineer", Objective: "x"}
-	if score := agentFitScore(empty, requirements); score > 1 {
-		// A perfect score for declaring nothing would make the threshold
-		// meaningless.
-		t.Logf("declared-nothing score: %v", score)
-	}
+	emptyScore := agentFitScore(empty, requirements)
+	// The previous version of this branch logged the score and asserted nothing,
+	// so it could not fail: a claim about a threshold that never fails is not a
+	// check. The meaningful property is relative — declaring a match must beat
+	// declaring nothing — and that is asserted below.
 	claimed := SubagentSpec{AgentID: "b", Role: "engineer", Objective: "x", Tags: []string{"rust", "build"}}
-	if agentFitScore(claimed, requirements) <= agentFitScore(empty, requirements) {
-		t.Fatal("declaring a matching capability did not improve the score")
+	claimedScore := agentFitScore(claimed, requirements)
+	if claimedScore <= emptyScore {
+		t.Fatalf("declaring a matching capability did not improve the score: claimed=%v empty=%v", claimedScore, emptyScore)
+	}
+	// A threshold between the two must separate them, which is what makes
+	// MinAgentFit usable rather than decorative.
+	kept, rejected := filterByFit([]SubagentSpec{empty, claimed}, requirements, (emptyScore+claimedScore)/2)
+	if len(rejected) != 1 || len(kept) != 1 || kept[0].AgentID != "b" {
+		t.Fatalf("a threshold between the two scores did not separate them: kept=%v rejected=%v", kept, rejected)
 	}
 }
 
