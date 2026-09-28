@@ -17,6 +17,10 @@ type ContextBuilder struct {
 	Skills SkillResolver
 	Tools  *ToolRegistry
 	Cache  *PrefixCache
+	// ToolCatalogThreshold defers full tool schemas once the visible catalogue
+	// exceeds it, replacing them with a compact catalogue and tool_search.
+	// Zero disables deferral and keeps every schema, which is the default.
+	ToolCatalogThreshold int
 	// Compactor summarizes context that no longer fits. Nil selects the
 	// deterministic extractive default.
 	Compactor Compactor
@@ -29,7 +33,15 @@ type ContextBuilder struct {
 }
 
 func NewContextBuilder(memories *MemoryManager, skills *SkillRegistry, tools *ToolRegistry, cache *PrefixCache) *ContextBuilder {
-	return &ContextBuilder{Memories: memories, Skills: skills, Tools: tools, Cache: cache, CompilerVersion: "context-v1"}
+	builder := &ContextBuilder{Memories: memories, Tools: tools, Cache: cache, CompilerVersion: "context-v1"}
+	// Assigning a nil *SkillRegistry to the SkillResolver interface would store
+	// a TYPED nil, which is not == nil, so every later nil check would pass and
+	// the first Resolve call would dereference a nil receiver. Only a non-nil
+	// registry is installed.
+	if skills != nil {
+		builder.Skills = skills
+	}
+	return builder
 }
 
 func stateMap(state TaskState) map[string]any {
@@ -84,9 +96,13 @@ func (b *ContextBuilder) BuildWithContext(ctx context.Context, request TaskReque
 		dynamic = append(dynamic, map[string]any{"role": "observation", "content": obs})
 	}
 	all := append(append([]map[string]any{}, stable...), dynamic...)
-	tools := []map[string]any{}
-	if b.Tools != nil {
-		tools = b.Tools.SchemasForAuth(nil, auth)
+	tools, catalog := b.toolSchemasFor(auth)
+	if catalog != "" {
+		// The catalogue is stable content: it depends on the tool set and the
+		// caller's scopes, not on the conversation, so it belongs in the cached
+		// prefix rather than in the changing tail.
+		stable = append(stable, map[string]any{"role": "developer", "content": catalog, "stable": true})
+		all = append(append([]map[string]any{}, stable...), dynamic...)
 	}
 	memories := []map[string]any{}
 	if b.Memories != nil {

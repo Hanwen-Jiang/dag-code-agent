@@ -69,6 +69,12 @@ func (r *SkillRegistry) Deprecate(id, version string) bool {
 	return false
 }
 func (r *SkillRegistry) Resolve(goal string, auth AuthContext) []SkillManifest {
+	// A nil receiver answers "no skills" rather than panicking: a caller that
+	// installs a typed nil through the resolver interface would otherwise turn
+	// a configuration mistake into a crash inside context compilation.
+	if r == nil {
+		return nil
+	}
 	result := []SkillManifest{}
 	for id := range r.skills {
 		skill, ok := r.Activate(id)

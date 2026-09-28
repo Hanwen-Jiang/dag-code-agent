@@ -46,6 +46,8 @@ type runtimeConfig struct {
 	streamBuffer int
 	// subagentPolicy bounds fan-out.
 	subagentPolicy SubagentPolicy
+	// toolCatalogThreshold defers tool schemas above this catalogue size.
+	toolCatalogThreshold int
 }
 
 // WithStreamBuffer sets how many observation frames a streamed run may queue
@@ -345,6 +347,16 @@ func New(opts ...Option) (*Runtime, error) {
 	// spill level needs.
 	if cfg.skillResolver != nil {
 		cfg.contextBuilder.Skills = cfg.skillResolver
+	}
+	if cfg.toolCatalogThreshold > 0 {
+		cfg.contextBuilder.ToolCatalogThreshold = cfg.toolCatalogThreshold
+		// The resolver is registered here rather than left to the embedder: a
+		// deferred catalogue without it would list tools the model cannot use.
+		if cfg.registry != nil {
+			if err := cfg.registry.Register(NewToolSearchTool(cfg.registry)); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if cfg.contextBuilder.Spill == nil {
 		if artifacts, ok := cfg.store.(ArtifactStore); ok {
