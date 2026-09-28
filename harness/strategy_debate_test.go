@@ -147,3 +147,88 @@ func TestDebateRespectsTheDebaterCount(t *testing.T) {
 		t.Fatalf("spawned %d debaters, want 2", children)
 	}
 }
+
+// A strategy required to fan out at maximum depth must not have to retry until
+// the loop backstop kills the run. That is what happened before the refusal was
+// made visible, and it turned a bounded inconvenience into a terminated task.
+func TestDebateAtMaxDepthFallsBackToJudging(t *testing.T) {
+	store := NewInMemoryStore()
+	defer store.Close()
+	runtime, err := New(
+		WithStore(store), WithModel(debatingModel{}),
+		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))),
+		WithIDSource(sequentialIDs()),
+		// MaxDepth 0 means every fan-out is refused.
+		WithSubagentPolicy(SubagentPolicy{MaxParallel: 2, MaxDepth: 0, DefaultMaxSteps: 3, BudgetShare: 0.25}),
+		WithStrategyInstance(DebateStrategy{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
+
+	result, err := runtime.Run(context.Background(), TaskRequest{
+		TaskID: "refused", Goal: "decide something", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 6,
+	}, auth)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != TaskCompleted {
+		t.Fatalf("status=%s category=%s error=%v: a refused debate did not fall through to answering",
+			result.Status, result.FailureCategory, result.State.LastError)
+	}
+	if result.FinalAnswer != "the judged answer" {
+		t.Fatalf("final answer=%q", result.FinalAnswer)
+	}
+	// It must reach the answer without exhausting the iteration budget, which is
+	// what retrying the refused fan-out used to do.
+	events, err := runtime.Journal().Replay("refused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) > 20 {
+		t.Fatalf("the run took %d events to answer, which means it retried the refused fan-out", len(events))
+	}
+	// No debater tasks: the fan-out really was refused.
+	if _, _, err := store.GetTask("refused:debater-1"); err == nil {
+		t.Fatal("a debater was created despite MaxDepth 0")
+	}
+}
+
+// The refusal is recorded durably, so a resumed run does not retry it from a
+// clean slate.
+func TestFanoutRefusalSurvivesResume(t *testing.T) {
+	store := NewInMemoryStore()
+	defer store.Close()
+	runtime, err := New(
+		WithStore(store), WithModel(newDelegatingModel()),
+		WithClock(FixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))),
+		WithIDSource(sequentialIDs()),
+		WithSubagentPolicy(SubagentPolicy{MaxParallel: 1, MaxDepth: 0, DefaultMaxSteps: 2, BudgetShare: 0.25}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	auth := AuthContext{TenantID: "tenant", SubjectID: "subject", Scopes: []string{"read", "write"}}
+
+	// A task whose only step asks to delegate, so the refusal is journaled and
+	// the run then fails for an unrelated reason.
+	registry := NewToolRegistry()
+	// The goal asks to delegate, so the model proposes subagents and the depth
+	// limit refuses them.
+	if _, err := runtime.Run(context.Background(), TaskRequest{
+		TaskID: "resumed", Goal: "DELEGATE this work", TenantID: auth.TenantID, SubjectID: auth.SubjectID, MaxSteps: 4,
+	}, auth); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	_ = registry
+	state, _, err := store.GetTask("resumed")
+	if err != nil {
+		t.Fatalf("task: %v", err)
+	}
+	if state.Metadata[fanoutRejectedKey] == nil {
+		t.Fatal("the refusal was not recorded in the durable state, so a resume would retry it")
+	}
+}

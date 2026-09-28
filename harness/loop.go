@@ -232,6 +232,11 @@ type LoopState struct {
 	NeedUser       map[string]any
 	LastTool       []ToolResult
 	LastSubs       []SubagentResult
+	// FanoutRejected is set when the kernel refused a requested fan-out. Without
+	// it a strategy cannot tell "the fan-out has not run yet" from "the fan-out
+	// was refused", so it retries the same request until the loop backstop
+	// terminates the run.
+	FanoutRejected map[string]any
 
 	// Scratch is strategy-private state. The kernel persists it with the
 	// checkpoint, so a resumed run observes the same Scratch.

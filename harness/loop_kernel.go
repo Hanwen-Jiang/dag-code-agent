@@ -201,7 +201,22 @@ func (k *loopKernel) loopState(state TaskState) LoopState {
 		Clock:    k.runtime.clock,
 		RNG:      k.rng,
 		LastText: state.FinalAnswer,
+		// Read from the durable state, so a run resumed after a refused fan-out
+		// does not retry it from a clean slate.
+		FanoutRejected: fanoutRejection(state),
 	}
+}
+
+// fanoutRejectedKey records that the kernel refused a requested fan-out.
+const fanoutRejectedKey = "last_fanout_rejected"
+
+// fanoutRejection reads the recorded refusal, if any.
+func fanoutRejection(state TaskState) map[string]any {
+	if state.Metadata == nil {
+		return nil
+	}
+	rejection, _ := state.Metadata[fanoutRejectedKey].(map[string]any)
+	return rejection
 }
 
 // refresh re-reads the counters a strategy may observe after a step.
@@ -210,6 +225,10 @@ func (k *loopKernel) refresh(view LoopState, state TaskState) LoopState {
 	view.Turns = state.Turns
 	view.Budget = budgetSnapshot(k.budget())
 	view.Scratch = k.scratch
+	// Refusals are decided during a step, so they only become visible here.
+	// Setting this in loopState alone left every strategy reading nil for the
+	// whole run, which is the failure the tests caught.
+	view.FanoutRejected = fanoutRejection(state)
 	return view
 }
 
@@ -680,6 +699,15 @@ func (k *loopKernel) executeFanout(ctx context.Context, state TaskState, stepNum
 		}); err != nil {
 			result := r.failAndCommit(state, "STORE", err)
 			return StepResult{}, state, &result
+		}
+		// Recorded durably, not held in memory: without it a strategy cannot
+		// tell "the fan-out has not run yet" from "the fan-out was refused", so
+		// it retries until the loop backstop terminates the run.
+		if state.Metadata == nil {
+			state.Metadata = map[string]any{}
+		}
+		state.Metadata[fanoutRejectedKey] = map[string]any{
+			"reason": ErrSubagentDepthExceeded.Error(), "max_depth": policy.MaxDepth, "depth": k.depth,
 		}
 		state.Observations = append(state.Observations, map[string]any{
 			"type": "subagents_rejected", "reason": ErrSubagentDepthExceeded.Error(), "max_depth": policy.MaxDepth,

@@ -65,6 +65,12 @@ func (s DebateStrategy) Version() string { return debateStrategyVersion }
 func (s DebateStrategy) Next(ctx context.Context, st LoopState) (Action, error) {
 	switch debatePhase(st) {
 	case 0:
+		// A refused fan-out must not be retried. Retrying is what a strategy
+		// does when it cannot tell refusal from "not yet", and it ends with the
+		// loop backstop killing the run rather than with an answer.
+		if st.FanoutRejected != nil {
+			return Action{Kind: ActionCallModel, Guidance: []string{s.judgeInstruction(st)}}, nil
+		}
 		return Action{Kind: ActionVote, Subagents: s.debateSpecs(st)}, nil
 	case 1:
 		return Action{Kind: ActionCallModel, Guidance: []string{s.judgeInstruction(st)}}, nil
@@ -82,7 +88,9 @@ func (s DebateStrategy) OnResult(st LoopState, result StepResult) LoopState {
 	// it: a fan-out reports Action=CallModel like any other model step, so
 	// branching on the action here would leave the strategy stuck in phase one
 	// forever.
-	if len(result.SubagentResults) > 0 && debatePhase(st) == 0 {
+	if debatePhase(st) == 0 && (len(result.SubagentResults) > 0 || st.FanoutRejected != nil) {
+		// Either the debate happened or it was refused; both mean the strategy
+		// moves on rather than asking again.
 		next.Scratch[debatePhaseKey] = 1
 		return next
 	}
@@ -116,6 +124,12 @@ func (s DebateStrategy) debateSpecs(st LoopState) []SubagentSpec {
 // debate is already in the context the model is about to receive, and copying it
 // into a directive would send it twice and spend the budget twice.
 func (s DebateStrategy) judgeInstruction(st LoopState) string {
+	if len(st.LastSubs) == 0 {
+		// The debate was refused, so there is nothing to weigh. Saying so keeps
+		// the judge from looking for arguments that were never produced.
+		return "You are the judge, but the debate could not be held. Answer the task directly, " +
+			"and note in one sentence what a second opinion would have added."
+	}
 	return fmt.Sprintf(
 		"You are the judge. %d positions on this task were argued and their results are in the observations above. "+
 			"Weigh them against the task, decide which is better supported, and produce the final answer. "+
