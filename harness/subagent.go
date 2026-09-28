@@ -250,7 +250,7 @@ func (s *subagentRunner) spawn(ctx context.Context, spec SubagentSpec) SubagentR
 // duration, so a child that took the same lock would deadlock against its own
 // parent.
 func (s *subagentRunner) drive(ctx context.Context, childID string, spec SubagentSpec) SubagentResult {
-	result := s.runtime.continueRunWithLedger(ctx, childID, s.auth, s.childLedger())
+	result := s.runtime.continueRunFor(ctx, childID, s.auth, s.childLedger(), ReActStrategy{})
 	if result.Status != TaskCompleted {
 		return SubagentResult{
 			AgentID: spec.AgentID,

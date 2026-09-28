@@ -371,6 +371,19 @@ func (r *Runtime) continueRun(ctx context.Context, taskID string, auth AuthConte
 // holds that lock, so taking it here would deadlock a fan-out against its own
 // parent.
 func (r *Runtime) continueRunWithLedger(ctx context.Context, taskID string, auth AuthContext, ledger *BudgetLedger) RunResult {
+	return r.continueRunFor(ctx, taskID, auth, ledger, r.strategy)
+}
+
+// continueRunFor drives a task under an explicit topology.
+//
+// A subagent runs under a simple one rather than inheriting its parent's.
+// Inheriting is wrong in both directions: a debater holding its own debate is
+// incoherent, and a topology whose whole purpose is to fan out would fan out
+// again inside every child — which is not hypothetical. A debate child did
+// exactly that and spent 134 iterations before the loop backstop stopped it.
+// The depth limit already says a child may not delegate; running a topology that
+// requires delegation contradicts it.
+func (r *Runtime) continueRunFor(ctx context.Context, taskID string, auth AuthContext, ledger *BudgetLedger, strategy Strategy) RunResult {
 	state, _, err := r.store.GetTask(taskID)
 	if err != nil {
 		return failedResult(TaskRequest{TaskID: taskID}, err)
@@ -399,9 +412,12 @@ func (r *Runtime) continueRunWithLedger(ctx context.Context, taskID string, auth
 	}); err != nil {
 		return r.failAndCommit(state, "STORE", err)
 	}
+	if strategy == nil {
+		strategy = ReActStrategy{}
+	}
 	kernel := &loopKernel{
 		runtime:  r,
-		strategy: r.strategy,
+		strategy: strategy,
 		request:  request,
 		auth:     auth,
 		scratch:  loadStrategyScratch(state),
