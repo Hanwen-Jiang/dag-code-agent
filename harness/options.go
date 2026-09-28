@@ -396,7 +396,7 @@ func New(opts ...Option) (*Runtime, error) {
 		cfg.loopGuard = newDetectorLoopGuard()
 	}
 	if cfg.strategies == nil {
-		cfg.strategies = NewStrategyRegistry(ReActStrategy{}, ReflectionStrategy{}, CoTStrategy{}, DebateStrategy{}, TreeOfThoughtsStrategy{})
+		cfg.strategies = NewStrategyRegistry(ReActStrategy{}, ReflectionStrategy{}, CoTStrategy{}, DebateStrategy{}, TreeOfThoughtsStrategy{}, ResearchStrategy{})
 	}
 	if cfg.strategy == nil {
 		name := cfg.strategyName
