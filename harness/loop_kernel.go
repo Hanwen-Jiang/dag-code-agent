@@ -275,6 +275,14 @@ func (k *loopKernel) stepModel(ctx context.Context, state TaskState) (StepResult
 	started := r.clock.Now()
 	response, err := r.completeModel(ctx, &state, modelRequest)
 	if err != nil {
+		// A cancellation surfaces here as a model error, because the adapter
+		// returns ctx.Err(). Recording that as a MODEL failure would report an
+		// intentional cancellation as a defect and fire any monitor that alerts
+		// on failures, so the context is consulted before the error is
+		// classified.
+		if cancelled := k.commitCancellation(ctx, &state); cancelled != nil {
+			return StepResult{}, state, cancelled
+		}
 		category := "MODEL"
 		if me, ok := err.(*ModelError); ok && !me.Retryable {
 			category = "MODEL_PERMANENT"
@@ -776,4 +784,24 @@ func (k *loopKernel) stepSearchTools(ctx context.Context, state TaskState, query
 		return StepResult{}, state, &result
 	}
 	return StepResult{Action: ActionSearchTools}, state, nil
+}
+
+// commitCancellation durably records a cancellation, or returns nil when the
+// context is still live.
+//
+// It mirrors the cancellation branch at the top of the loop so a run cancelled
+// mid-step produces exactly the same journal as one cancelled between steps.
+func (k *loopKernel) commitCancellation(ctx context.Context, state *TaskState) *RunResult {
+	if ctx.Err() == nil {
+		return nil
+	}
+	r := k.runtime
+	state.Status = TaskCancelled
+	state.LastError = map[string]any{"code": "CANCELLED", "message": ctx.Err().Error()}
+	_ = r.commitEvent(state, "TURN_COMPLETED", r.turnCompletedPayload(ctx, map[string]any{
+		"turn_id": state.CurrentTurnID, "status": TaskCancelled, "reason": "context_cancelled",
+	}))
+	_ = r.commitEvent(state, "TASK_CANCELLED", state.LastError)
+	result := r.result(*state, "")
+	return &result
 }

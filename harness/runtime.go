@@ -68,6 +68,12 @@ type Runtime struct {
 	streamBuffer int
 	// subagentPolicy bounds fan-out.
 	subagentPolicy SubagentPolicy
+	// running maps a live task to the function that cancels its context. It is
+	// guarded by its own lock rather than r.mu, because r.mu is held for the
+	// whole duration of a run: a caller asking to cancel would have to wait for
+	// the very thing it is trying to stop.
+	runningMu sync.Mutex
+	running   map[string]context.CancelFunc
 	// newID generates identifiers created during a run; injectable so a
 	// deterministic test can assert a byte-identical journal.
 	newID func(string) string
@@ -294,6 +300,11 @@ func (r *Runtime) run(ctx context.Context, request TaskRequest, auth AuthContext
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Registered under the run lock but signalling through its own, so Cancel
+	// reaches a live run instead of queueing behind it.
+	runCtx, endRun := r.beginRun(ctx, request.TaskID)
+	defer endRun()
+	ctx = runCtx
 	if existing, _, err := r.store.GetTask(request.TaskID); err == nil {
 		stored := requestFromState(existing)
 		if stored.Goal != request.Goal || stored.TenantID != request.TenantID || stored.SubjectID != request.SubjectID {
@@ -519,6 +530,9 @@ func (r *Runtime) resultWithFailure(state TaskState, category string) RunResult 
 func (r *Runtime) resume(ctx context.Context, taskID, userMessage string, auth AuthContext) RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	runCtx, endRun := r.beginRun(ctx, taskID)
+	defer endRun()
+	ctx = runCtx
 	state, _, err := r.store.GetTask(taskID)
 	if err != nil {
 		return failedResult(TaskRequest{TaskID: taskID}, err)
@@ -546,6 +560,9 @@ func (r *Runtime) resume(ctx context.Context, taskID, userMessage string, auth A
 func (r *Runtime) sendMessage(ctx context.Context, taskID, userMessage string, auth AuthContext) RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	runCtx, endRun := r.beginRun(ctx, taskID)
+	defer endRun()
+	ctx = runCtx
 	state, _, err := r.store.GetTask(taskID)
 	if err != nil {
 		return failedResult(TaskRequest{TaskID: taskID}, err)
@@ -569,6 +586,14 @@ func (r *Runtime) sendMessage(ctx context.Context, taskID, userMessage string, a
 	return r.continueRun(ctx, taskID, auth)
 }
 func (r *Runtime) cancel(taskID string, auth AuthContext) RunResult {
+	// Signal a live run FIRST and without the run lock. Waiting for r.mu here
+	// would block until the run finished, which is precisely what cancellation
+	// is supposed to avoid. The run observes the cancelled context and durably
+	// records its own termination; the lock is taken below only to cover a task
+	// that is not running at all.
+	if cancel := r.runCancelFunc(taskID); cancel != nil {
+		cancel()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, _, err := r.store.GetTask(taskID)
@@ -603,4 +628,41 @@ func taskDepth(state TaskState) int {
 		return int(depth)
 	}
 	return 0
+}
+
+// registerRun records how to cancel a live task.
+func (r *Runtime) registerRun(taskID string, cancel context.CancelFunc) {
+	r.runningMu.Lock()
+	defer r.runningMu.Unlock()
+	if r.running == nil {
+		r.running = map[string]context.CancelFunc{}
+	}
+	r.running[taskID] = cancel
+}
+
+func (r *Runtime) unregisterRun(taskID string) {
+	r.runningMu.Lock()
+	defer r.runningMu.Unlock()
+	delete(r.running, taskID)
+}
+
+// runCancelFunc returns the cancel function for a live task, if any.
+func (r *Runtime) runCancelFunc(taskID string) context.CancelFunc {
+	r.runningMu.Lock()
+	defer r.runningMu.Unlock()
+	return r.running[taskID]
+}
+
+// beginRun makes a run cancellable and returns the context it should use.
+//
+// Every entry point that can hold the runtime lock for a long time goes through
+// this, so Cancel works against a running task rather than only against one that
+// has already stopped.
+func (r *Runtime) beginRun(ctx context.Context, taskID string) (context.Context, func()) {
+	runCtx, cancel := context.WithCancel(ctx)
+	r.registerRun(taskID, cancel)
+	return runCtx, func() {
+		r.unregisterRun(taskID)
+		cancel()
+	}
 }
